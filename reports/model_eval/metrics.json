@@ -1,0 +1,29 @@
+{
+  "pinball_loss_alpha_10": 0.02571513527163868,
+  "pinball_loss_alpha_50": 0.051350454852245625,
+  "pinball_loss_alpha_90": 0.023141075802722795,
+  "mae_p50": 0.10270090970449125,
+  "coverage_p10_p90": 0.6666666666666666,
+  "p90_exceedance": 0.1740976645435244,
+  "p10_undershoot": 0.1592356687898089,
+  "baseline_naive_mean_value": 0.4901137801921557,
+  "baseline_naive_mean_mae": 0.12844241464141487,
+  "baseline_theoretical_only_mae": 0.12290089502707992,
+  "mae_by_linea": {
+    "14": 0.09088755671218601,
+    "17": 0.10716260752723791,
+    "19": 0.10564344776428876
+  },
+  "shap_top_10": [
+    "sku",
+    "prev_oee",
+    "sku_line_oee_p90_last_30d",
+    "familia",
+    "week_iso",
+    "linea_oee_p50_last_7d",
+    "familia_line_oee_p50",
+    "n_llamadas_mant",
+    "c_producto_flag",
+    "hours_since_same_sku"
+  ]
+}

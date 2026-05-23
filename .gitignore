@@ -15,3 +15,6 @@ venv/
 
 # Build artifacts
 *.html.tmp
+
+# HF staging
+.hf_stage/

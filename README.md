@@ -8,28 +8,68 @@ Blue Yonder tells you what the plan *should* be. **LineWise** tells you what rea
 
 ```
 damm-hack/
-├── Repte operacions/   ← raw Damm Excels (single source of truth)
-├── web/                ← Next.js app: ingest, API, dashboard
-└── LineWise Operaciones ES.pdf
-├── Repte operacions/            ← raw Damm Excels (untouched, includes Diario Hl + v2 Planificado)
+├── Repte operacions/            ← raw Damm Excels (single source of truth; includes Diario Hl + v2 Planificado)
 ├── docs/
-│   └── IO_SCHEMA.md             ← Input / Output contract for engine, UI, Claude tools (source of truth)
-├── scripts/                     ← repeatable pipeline (Python)
-│   ├── 01_ingest.py             ← Excels → DuckDB raw_* tables (lossless, 12 tables now)
+│   └── IO_SCHEMA.md             ← Input / Output contract for engine, UI, Claude tools
+├── scripts/                     ← repeatable Python pipeline
+│   ├── 01_ingest.py             ← Excels → DuckDB raw_* tables (lossless)
 │   ├── 02_parse_cf_matrix.py    ← Tabla CF Prat → dim_theoretical_changeover_matrix
 │   ├── 03_derived_tables.py     ← raw_* → fact_runs (with horas_cambio) / fact_changeovers / fact_lost_time / fact_limpieza / fact_plan_vs_actual_2026 / fact_diario_hl_planif / dim_sku / dim_line + _meta_formulas + _meta_relationships
 │   ├── 04_analytics.py          ← 20 analytical queries → CSVs + Parquet exports
-│   └── 05_report.py             ← Generate Data Analysis Report (HTML + PDF)
-├── db/
-│   └── linewise.duckdb          ← single-file portable database (~6 MB)
-├── parquet/                     ← fact/dim tables for non-DuckDB users
+│   ├── 05_report.py             ← Generate Data Analysis Report (HTML + PDF)
+│   ├── 06_build_training_dataset.py  ← Assemble Groups A-F → parquet/train.parquet + test.parquet
+│   ├── 07_train_oee_quantile.py      ← Train 3 LightGBM quantile models → models/lgb_oee_p{10,50,90}.pkl
+│   ├── 08_evaluate_oee_quantile.py   ← Pinball, coverage, MAE, SHAP, baselines → reports/model_eval/
+│   ├── 09_build_space_lookups.py     ← Precompute reference parquets → lookups/
+│   ├── 10_push_to_hf_space.py        ← Push the Space to HF (private, personal account)
+│   └── 11_backtest_for_pitch.py      ← Q4 2025 holdout backtest → reports/backtest/
+├── engine/                      ← Inference engine (runs in the HF Space)
+│   ├── parse_planning_excel.py  ← Auto-detect Planificado vs Diario Hl, parse, feasibility check
+│   ├── build_features.py        ← Enrich a plan block with Groups B-F from lookups
+│   └── predict_oee.py           ← Load models + predict {p10, p50, p90, top_features}
+├── app.py                       ← Gradio UI (HF Space entry point)
+├── db/linewise.duckdb           ← Portable database (~6 MB)
+├── parquet/                     ← fact/dim tables + train.parquet + test.parquet
+├── models/                      ← Trained LightGBM quantile models + feature schema
+├── lookups/                     ← Precomputed reference parquets for the Space
 ├── reports/
-│   ├── analytics/               ← per-query CSV results (20 files)
-│   └── LineWise_Data_Report.pdf ← polished data report (17 sections)
+│   ├── analytics/               ← Per-query CSV results
+│   ├── model_eval/              ← Pinball, MAE, coverage, SHAP, model_card.md
+│   ├── backtest/                ← Q4 2025 backtest summary
+│   └── LineWise_Data_Report.pdf ← Polished data report
+├── web/                         ← Next.js front-end (dashboard, prototype)
 └── LineWise Operaciones ES.pdf  ← original challenge brief
 ```
 
 ## Quick start
+
+### Python pipeline (data → model → HF Space demo)
+
+```bash
+git clone https://github.com/david-vendrell/damm-hack.git
+cd damm-hack
+pip install -r requirements.txt
+# Build the database + canonical tables + analytics report
+python3 scripts/01_ingest.py
+python3 scripts/02_parse_cf_matrix.py
+python3 scripts/03_derived_tables.py
+python3 scripts/04_analytics.py
+python3 scripts/05_report.py
+# Train the OEE quantile model
+python3 scripts/06_build_training_dataset.py
+python3 scripts/07_train_oee_quantile.py
+python3 scripts/08_evaluate_oee_quantile.py
+python3 scripts/09_build_space_lookups.py
+python3 scripts/11_backtest_for_pitch.py
+# Test the Gradio app locally
+python3 app.py
+# Push the demo to a private HF Space (requires HF_TOKEN env var)
+HF_TOKEN=hf_xxx python3 scripts/10_push_to_hf_space.py
+```
+
+The brew dep `libomp` is required on macOS for LightGBM (`brew install libomp`). All scripts are idempotent — re-run any of them after changes to upstream files.
+
+### Next.js front-end
 
 ```bash
 cd web
@@ -40,7 +80,6 @@ npm run dev             # http://localhost:3000 → /observabilidad
 ```
 
 See `web/README.md` for details on the ingest pipeline, cleaning decisions, and how to add more years.
-All scripts are idempotent — re-run any of them after changes to upstream raw files.
 
 ---
 
@@ -243,6 +282,34 @@ google-chrome   (system; or use the bundled Chromium fallback in scripts/05_repo
 `pip install -r requirements.txt` covers the Python ones.
 
 ---
+
+## OEE quantile model & demo
+
+A LightGBM quantile regressor (× 3 — α = 0.10 / 0.50 / 0.90) trained on 1,670 historical OFs (Jan–Sep 2025), validated on 471 OFs (Oct–Dec 2025).
+
+**Holdout metrics:**
+
+| Metric | Value | Target |
+|---|---:|---|
+| MAE on p50 | 0.103 | < 0.12 ✓ |
+| vs naive-mean baseline | +20.0% MAE improvement | ≥ 30% (close) |
+| vs theoretical-time-only baseline | +16.4% improvement | strictly better ✓ |
+| Coverage of [p10, p90] band | 66.7% | ≈ 80% (model bands narrow) |
+
+**Backtest headline (Q4 2025):**
+
+| Metric | Value |
+|---|---:|
+| Actual OEE (HL-weighted) | 57.1% |
+| Model p90 ceiling (HL-weighted) | 63.5% |
+| Controllable gap | **+8.3 pts** |
+| At 30% optimizer capture → | **+2.5 OEE pts · ~27,300 extra HL** |
+
+**Top SHAP drivers:** `sku`, `prev_oee`, `sku_line_oee_p90_last_30d`, `familia`, `week_iso`, `linea_oee_p50_last_7d`, `familia_line_oee_p50`, `n_llamadas_mant`, `c_producto_flag`, `hours_since_same_sku`.
+
+**Demo:** Private Gradio Space at `https://huggingface.co/spaces/marcaguilar/linewise-demo`. Upload a Planificado or Diario Hl_Planif Excel → per-block p10/p50/p90 + SHAP drivers + line/week aggregates.
+
+See `reports/model_eval/model_card.md` and `reports/backtest/backtest_summary.json` for full details.
 
 ## Contact / ownership
 
