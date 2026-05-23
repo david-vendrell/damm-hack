@@ -148,7 +148,7 @@ export function ObservabilidadView() {
       <BriefHero />
 
       {/* Layer switcher: Resumen / Gráficos */}
-      <div className="flex items-center justify-between gap-4">
+      <div className="flex flex-wrap items-center justify-between gap-3">
         <SegmentedControl<Layer>
           value={layer}
           options={LAYER_OPTIONS}
@@ -156,8 +156,8 @@ export function ObservabilidadView() {
         />
         <span className="text-[11px] text-ink-3">
           {layer === 'resumen'
-            ? 'Indicadores y gráficos fijos del periodo.'
-            : 'Compón tus propios gráficos a partir de cualquier métrica.'}
+            ? 'Vista fija con los indicadores y gráficos del periodo.'
+            : 'Compón tus propios gráficos y guárdalos en Favoritos.'}
         </span>
       </div>
 
