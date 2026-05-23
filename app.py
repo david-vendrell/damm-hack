@@ -78,18 +78,34 @@ def _block_table(preds: pd.DataFrame) -> pd.DataFrame:
 
 def _line_summary(preds: pd.DataFrame) -> pd.DataFrame:
     if preds.empty:
-        return pd.DataFrame(columns=["Línea", "# bloques", "OEE p50 medio", "OEE p90 medio", "% feasible"])
-    g = preds.groupby("linea").agg(
-        n=("sku", "size"),
-        p50_avg=("p50", "mean"),
-        p90_avg=("p90", "mean"),
-        feasible_rate=("feasible", "mean"),
-    ).reset_index()
-    g.columns = ["Línea", "# bloques", "OEE p50 medio", "OEE p90 medio", "% feasible"]
-    g["OEE p50 medio"] = g["OEE p50 medio"].map(_fmt_pct)
-    g["OEE p90 medio"] = g["OEE p90 medio"].map(_fmt_pct)
-    g["% feasible"]    = (g["% feasible"] * 100).round(0).astype(int).astype(str) + "%"
-    return g
+        return pd.DataFrame(columns=["Línea", "# bloques", "HL planificados",
+                                     "OEE p50 (HL-ponderada)", "OEE p90 (HL-ponderada)", "% feasible"])
+    def _wavg(grp, col):
+        hl = grp["hl"].fillna(0).clip(lower=0)
+        if hl.sum() == 0:
+            return float(grp[col].mean())
+        return float((grp[col] * hl).sum() / hl.sum())
+    rows = []
+    for linea, grp in preds.groupby("linea"):
+        rows.append({
+            "Línea":                       f"L{int(linea)}",
+            "# bloques":                   int(len(grp)),
+            "HL planificados":             int(grp["hl"].sum()) if "hl" in grp.columns else 0,
+            "OEE p50 (HL-ponderada)":      _fmt_pct(_wavg(grp, "p50")),
+            "OEE p90 (HL-ponderada)":      _fmt_pct(_wavg(grp, "p90")),
+            "% feasible":                  f"{int(round(grp['feasible'].mean()*100))}%",
+        })
+    return pd.DataFrame(rows)
+
+
+def _factory_wide_oee(preds: pd.DataFrame, col: str) -> float:
+    """HL-weighted OEE across ALL blocks (factory-wide, all 3 líneas)."""
+    if preds.empty or col not in preds.columns:
+        return 0.0
+    hl = preds["hl"].fillna(0).clip(lower=0) if "hl" in preds.columns else None
+    if hl is None or hl.sum() == 0:
+        return float(preds[col].mean())
+    return float((preds[col] * hl).sum() / hl.sum())
 
 
 def _top_drivers_table(preds: pd.DataFrame, n_rows: int = 20) -> pd.DataFrame:
@@ -112,7 +128,7 @@ def _top_drivers_table(preds: pd.DataFrame, n_rows: int = 20) -> pd.DataFrame:
 
 def _per_line_compare_table_v2(per_line: dict, objective: str) -> pd.DataFrame:
     rows = []
-    obj_label = "p50 (esperado)" if objective == "p50" else "p90 (techo)"
+    obj_label = "p50" if objective == "p50" else "p90"
     for ln in sorted(per_line.keys()):
         v = per_line[ln]
         rows.append({
@@ -121,6 +137,30 @@ def _per_line_compare_table_v2(per_line: dict, objective: str) -> pd.DataFrame:
             f"OEE optimizada":              _fmt_pct(v["optimized"]),
             "Δ pts":                        f"{v['delta_pts']:+.2f}",
             "Bloques (antes → después)":   f"{v['n_blocks_baseline']} → {v['n_blocks_optimized']}",
+        })
+    return pd.DataFrame(rows)
+
+
+def _per_day_factory_table(per_day: list[dict], objective: str) -> pd.DataFrame:
+    """Factory-wide (3 líneas combinadas) HL-weighted OEE per día.
+
+    Recommended view: no Simpson's paradox here because the weighting is
+    factory-scope, so the per-día numbers compose into the headline by HL.
+    """
+    if not per_day:
+        return pd.DataFrame(columns=["Día", "Bloques (act→opt)", "HL del día",
+                                     f"OEE actual ({objective})", "OEE optimizada", "Δ pts"])
+    rows = []
+    day_names_es = {0: "Lun", 1: "Mar", 2: "Mié", 3: "Jue", 4: "Vie", 5: "Sáb", 6: "Dom"}
+    for d in per_day:
+        dt = pd.Timestamp(d["fecha"])
+        rows.append({
+            "Día":                          f"{day_names_es[dt.weekday()]} {d['fecha']}",
+            "Bloques (act→opt)":            f"{d['n_blocks_baseline']} → {d['n_blocks_optimized']}",
+            "HL del día":                   int(d.get("hl_total", 0)),
+            f"OEE actual ({objective})":    _fmt_pct(d["baseline"]),
+            "OEE optimizada":               _fmt_pct(d["optimized"]),
+            "Δ pts":                        f"{d['delta_pts']:+.2f}",
         })
     return pd.DataFrame(rows)
 
@@ -164,18 +204,28 @@ def predict(file_obj):
 
     n_blocks = meta["n_blocks"]
     n_infeas = meta["n_infeasible"]
-    week_p50 = preds["p50"].mean()
-    week_p90 = preds["p90"].mean()
+    week_p50 = _factory_wide_oee(preds, "p50")
+    week_p90 = _factory_wide_oee(preds, "p90")
+    total_hl = int(preds["hl"].sum()) if "hl" in preds.columns else 0
     src = meta["source"]
     warning = ""
     if meta.get("warnings"):
         warning = "\n\n> ⚠️ " + " ".join(meta["warnings"])
 
     summary_md = f"""
-### Resumen — Predicción
+### 🏭 OEE de la fábrica — 3 líneas combinadas (HL-ponderada)
+
+|                      | OEE esperado (p50)      | Techo razonable (p90)   |
+|----------------------|------------------------:|------------------------:|
+| **Predicho para la semana** | **{_fmt_pct(week_p50)}** | **{_fmt_pct(week_p90)}** |
+
 - **Formato detectado:** `{src}`
 - **Bloques analizados:** {n_blocks}  ·  **No factibles:** {n_infeas}
-- **OEE semanal estimado (p50 medio):** **{_fmt_pct(week_p50)}**  ·  techo p90 medio: {_fmt_pct(week_p90)}
+- **HL totales planificados:** **{total_hl:,}**
+
+> Estos números son la OEE de la **fábrica como conjunto** (HL-ponderada
+> sobre las 3 líneas). La tabla *Resumen por línea* desglosa los mismos
+> números por L14 / L17 / L19 para diagnóstico.
 {warning}
 """.strip()
 
@@ -183,9 +233,9 @@ def predict(file_obj):
 
 
 def optimize_v3(file_obj, aggressive: bool, progress=gr.Progress(track_tqdm=False)):
+    empty = pd.DataFrame()
     if file_obj is None:
-        return ("⚠️ Sube un fichero .xlsx primero.",
-                pd.DataFrame(), pd.DataFrame())
+        return ("⚠️ Sube un fichero .xlsx primero.", empty, empty, empty)
     path = file_obj if isinstance(file_obj, str) else file_obj.name
     objective = "p90" if aggressive else "p50"
     obj_label = "p90 (perseguir techo)" if aggressive else "p50 (esperado)"
@@ -194,42 +244,83 @@ def optimize_v3(file_obj, aggressive: bool, progress=gr.Progress(track_tqdm=Fals
         progress(0.15, desc="Construyendo lookup prev-aware (~30s)…")
         result, meta = _optimize_pipeline_v3(path, objective)
     except Exception as exc:
-        return (f"❌ Error optimizando: {exc}", pd.DataFrame(), pd.DataFrame())
+        return (f"❌ Error optimizando: {exc}", empty, empty, empty)
 
     if not result or not result.get("best_blocks", pd.DataFrame()).shape[0]:
         return ("⚠️ No se han encontrado bloques válidos para optimizar.",
-                pd.DataFrame(), pd.DataFrame())
+                empty, empty, empty)
 
-    baseline = result["baseline_score"]
+    baseline  = result["baseline_score"]
     optimized = result["optimized_score"]
     delta_pts = result["delta_oee_pts"]
     n_changes = result["n_changes"]
-    elapsed = result["elapsed_sec"]
-    audit_ok = result["audit"].get("all_ok", True)
-    weekly = result.get("weekly_summary", "")
+    elapsed   = result["elapsed_sec"]
+    total_hl  = int(result.get("total_hl", 0))
+    audit_ok  = result["audit"].get("all_ok", True)
+    weekly    = result.get("weekly_summary", "")
+    per_day   = result.get("per_day", [])
+    per_line  = result.get("per_line", {})
 
     progress(0.95, desc="Generando resumen…")
     status_emoji = "✅" if audit_ok else "⚠️"
 
-    summary_md = f"""
-### Resumen — Optimización V3 (modo: {obj_label})
-- **OEE actual** (HL-ponderada, {objective}): **{_fmt_pct(baseline)}**
-- **OEE optimizada** (HL-ponderada, {objective}): **{_fmt_pct(optimized)}**
-- **Ganancia:** **{delta_pts:+.2f} puntos de OEE**
-- **{n_changes}** reasignaciones en **{elapsed:.1f} s**  {status_emoji}
+    # Build per-línea diagnostic markdown (with Simpson's-paradox note)
+    per_line_md_rows = []
+    for ln in sorted(per_line.keys()):
+        v = per_line[ln]
+        per_line_md_rows.append(
+            f"| L{ln} | {_fmt_pct(v['baseline'])} | {_fmt_pct(v['optimized'])} | "
+            f"{v['delta_pts']:+.2f} | {v['n_blocks_baseline']} → {v['n_blocks_optimized']} |"
+        )
+    per_line_md = "\n".join(per_line_md_rows) if per_line_md_rows else "| — | — | — | — | — |"
 
-#### Resumen operacional
+    summary_md = f"""
+### 🏭 OEE de la fábrica — el número que importa
+
+> Esto es la OEE que producirá la **fábrica como conjunto** (3 líneas combinadas,
+> ponderada por HL). Es el número operativo: "qué fracción del tiempo total
+> planificado vamos a convertir en producto bueno".
+
+|                      | OEE de la fábrica ({objective}) |
+|----------------------|--------------------------------:|
+| **Plan actual**      | **{_fmt_pct(baseline)}** |
+| **Plan optimizado**  | **{_fmt_pct(optimized)}** |
+| **Ganancia**         | **{delta_pts:+.2f} puntos** |
+
+- **{n_changes}** reasignaciones aplicadas en **{elapsed:.1f} s**  {status_emoji}
+- **{total_hl:,} HL** totales planificados (sin cambio — volumen fijo)
+- Modo: **{obj_label}**
+
+#### Detalle operacional
 {weekly}
 
-> V3 usa un **lookup prev-aware** (predicción para cada combinación de **(OF, línea×día×turno, SKU anterior)**)
-> en lugar del lookup ciego de V2. Cada movimiento se evalúa con el contexto *real* de
-> cascada y se reporta con métricas operacionales explícitas:
-> **ΔOEE pts · Δ minutos de cambio · Δ horas a mantenimiento · si agrupa formato**.
-> Respeta plazos, volúmenes y la compatibilidad línea-formato confirmada por Damm.
+---
+
+#### 🔎 Por línea (diagnóstico — usa con cuidado)
+
+> ⚠️ **Paradoja de Simpson:** una línea puede empeorar de media mientras
+> la **fábrica global mejora**. Cuando movemos un bloque de L14 a L19, el bloque
+> aporta al global su NUEVA predicción más alta (buena noticia), pero la
+> media de L14 puede caer (pierde un bloque que estaba por encima de su media)
+> y la media de L19 también puede caer (gana un bloque por debajo de su media).
+> **El número que importa es el de la fábrica como conjunto** (arriba).
+
+| Línea | OEE actual ({objective}) | OEE optimizada | Δ pts | Bloques (act → opt) |
+|---|---|---|---|---|
+{per_line_md}
+
+---
+
+> V3 usa un **lookup prev-aware**: predicción para cada combinación de
+> **(OF, línea×día×turno, SKU anterior)**. Cada movimiento se evalúa con el
+> contexto *real* de cascada y se reporta con métricas operacionales explícitas
+> (ΔOEE · Δ min de cambio · Δ horas a mantenimiento · si agrupa formato).
+> Respeta plazos, volúmenes y la compatibilidad línea-formato.
 """.strip()
 
     return (summary_md,
-            _per_line_compare_table_v2(result["per_line"], objective),
+            _per_day_factory_table(per_day, objective),
+            _per_line_compare_table_v2(per_line, objective),
             _swap_log_v3_table(result["swap_log"]))
 
 
@@ -246,8 +337,13 @@ with gr.Blocks(
     gr.Markdown("""
     # LineWise · OEE forecaster & optimizer
     Sube el Excel de planificación de la semana (**`Planificado producciones`** o **`Diario Hl_Planif`**).
-    - **Predecir OEE** — detecta el formato y devuelve la predicción de OEE (p10 / p50 / p90) por bloque.
+    - **Predecir OEE** — detecta el formato y devuelve la **OEE de la fábrica** (3 líneas combinadas, HL-ponderada) y la predicción p10 / p50 / p90 por bloque.
     - **Optimizar plan** — reasigna cada OF a la mejor combinación de **línea × día × turno** respetando plazos, volúmenes y la compatibilidad línea-formato. Activa el modo agresivo para perseguir el techo p90.
+
+    > 💡 **Cómo leer los resultados:** el número que importa es la **OEE de la
+    > fábrica como conjunto** (HL-ponderada sobre las 3 líneas). La vista por
+    > línea es **diagnóstico** — puede mostrar caídas por línea aunque la
+    > fábrica global mejore (paradoja de Simpson, explicación dentro).
 
     *Damm × Engineering HUB Hackathon · canning lines 14 · 17 · 19 at El Prat.*
     """)
@@ -286,19 +382,23 @@ with gr.Blocks(
             blocks_tbl = gr.Dataframe(interactive=False, wrap=True)
         with gr.TabItem("Drivers (SHAP) — primeras 20 filas"):
             drivers_tbl = gr.Dataframe(interactive=False, wrap=True)
-        with gr.TabItem("Alternativas recomendadas (optimizador)"):
+        with gr.TabItem("Optimizador — resumen"):
             opt_summary = gr.Markdown(
                 "> Pulsa **Optimizar plan** tras subir un fichero. La búsqueda tarda "
                 "entre 30 s y 75 s — verás el progreso encima del botón. Activa el "
                 "**Modo agresivo** para perseguir el techo p90 con movimientos más ambiciosos."
             )
-            with gr.Row():
-                opt_line_tbl = gr.Dataframe(
-                    label="Por línea: actual vs optimizada",
-                    interactive=False,
-                )
+            opt_day_tbl = gr.Dataframe(
+                label="Por día — 3 líneas combinadas (vista recomendada)",
+                interactive=False,
+            )
+            opt_line_tbl = gr.Dataframe(
+                label="Por línea — diagnóstico (lee la nota arriba)",
+                interactive=False,
+            )
+        with gr.TabItem("Optimizador — reasignaciones"):
             opt_swap_tbl = gr.Dataframe(
-                label="Reasignaciones aplicadas",
+                label="Reasignaciones aplicadas (con motivo operacional)",
                 interactive=False, wrap=True,
             )
 
@@ -310,7 +410,7 @@ with gr.Blocks(
     btn_optimize.click(
         fn=optimize_v3,
         inputs=[file_in, aggressive],
-        outputs=[opt_summary, opt_line_tbl, opt_swap_tbl],
+        outputs=[opt_summary, opt_day_tbl, opt_line_tbl, opt_swap_tbl],
     )
 
 if __name__ == "__main__":

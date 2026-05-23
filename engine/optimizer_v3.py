@@ -253,6 +253,8 @@ def optimize_plan_v3(
 
     audit = full_audit(blocks, best_blocks, assignment, jobs_by_id, slots_by_id)
     per_line = _per_line_breakdown(blocks, base_preds, best_blocks, best_preds, objective)
+    per_day  = _per_day_factory_breakdown(blocks, base_preds, best_blocks, best_preds, objective)
+    total_hl = float(blocks["hl"].sum())
 
     summary = weekly_summary(swap_log, baseline_score, final_score)
 
@@ -266,6 +268,8 @@ def optimize_plan_v3(
         "best_preds":         best_preds,
         "swap_log":           swap_log,
         "per_line":           per_line,
+        "per_day":            per_day,
+        "total_hl":           total_hl,
         "elapsed_sec":        round(time.time() - t0, 2),
         "truncated":          bool((time.time() - t0) > time_budget_sec),
         "audit":              audit,
@@ -403,12 +407,49 @@ def _per_line_breakdown(blocks_base, preds_base, blocks_opt, preds_opt, objectiv
     return out
 
 
+def _per_day_factory_breakdown(blocks_base, preds_base, blocks_opt, preds_opt, objective):
+    """Factory-wide (all 3 lines combined) HL-weighted OEE per día.
+
+    This is the operationally meaningful breakdown: each día shows the OEE
+    the factory will produce that day combining whatever blocks landed on
+    L14 + L17 + L19. Avoids the Simpson's-paradox confusion of per-línea
+    averages by keeping the weighting at factory scope.
+    """
+    base_join = preds_base[["block_id", objective]].merge(
+        blocks_base[["block_id", "fecha", "hl"]], on="block_id")
+    opt_join = preds_opt[["block_id", objective]].merge(
+        blocks_opt[["block_id", "fecha", "hl"]], on="block_id")
+    base_join["fecha_d"] = pd.to_datetime(base_join["fecha"]).dt.date
+    opt_join["fecha_d"]  = pd.to_datetime(opt_join["fecha"]).dt.date
+
+    out: list[dict] = []
+    all_dates = sorted(set(base_join["fecha_d"].unique()) | set(opt_join["fecha_d"].unique()))
+    for d in all_dates:
+        bl = base_join[base_join["fecha_d"] == d]
+        ol = opt_join[opt_join["fecha_d"] == d]
+        b_hl = float(bl["hl"].sum())
+        o_hl = float(ol["hl"].sum())
+        b_oee = float((bl[objective] * bl["hl"]).sum() / max(b_hl, 1.0)) if b_hl else 0.0
+        o_oee = float((ol[objective] * ol["hl"]).sum() / max(o_hl, 1.0)) if o_hl else 0.0
+        out.append({
+            "fecha":               d.isoformat(),
+            "n_blocks_baseline":   int(len(bl)),
+            "n_blocks_optimized":  int(len(ol)),
+            "hl_total":            round(b_hl, 1),
+            "baseline":            round(b_oee, 4),
+            "optimized":           round(o_oee, 4),
+            "delta_pts":           round((o_oee - b_oee) * 100, 2),
+        })
+    return out
+
+
 def _empty_result():
     return {
         "objective": "p50",
         "baseline_score": 0.0, "optimized_score": 0.0, "delta_oee_pts": 0.0,
         "n_changes": 0, "best_blocks": pd.DataFrame(), "best_preds": pd.DataFrame(),
-        "swap_log": [], "per_line": {}, "elapsed_sec": 0.0,
+        "swap_log": [], "per_line": {}, "per_day": [], "total_hl": 0.0,
+        "elapsed_sec": 0.0,
         "truncated": False, "audit": {"all_ok": True}, "weekly_summary": "",
     }
 
@@ -437,6 +478,8 @@ def optimizer_v3_result_to_json(result):
         "truncated":                 bool(result["truncated"]),
         "weekly_summary":            result.get("weekly_summary", ""),
         "per_line":                  {str(k): v for k, v in result["per_line"].items()},
+        "per_day":                   result.get("per_day", []),
+        "total_hl":                  float(result.get("total_hl", 0.0)),
         "swap_log":                  result["swap_log"],
         "audit":                     result.get("audit", {}),
         "optimized_blocks":          _df(result["best_blocks"]),
