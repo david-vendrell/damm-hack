@@ -205,9 +205,13 @@ def _parse_diario_hl(xlsx_path: str | Path) -> pd.DataFrame:
         m = re.search(r"Centro\s*:", label, flags=re.IGNORECASE)
         if m:
             continue
-        if label.startswith("Total") or label.startswith("-"):
+        if label.lower().startswith("total") or label.startswith("-"):
             continue
         if current_linea is None:
+            continue
+        # Defensive: only treat as a real SKU if it looks like a Damm SKU code
+        # (alphanumeric, no spaces, ≤ 10 chars). Filters out "TOTAL", footer text, etc.
+        if not re.fullmatch(r"[A-Z0-9]{4,10}", label):
             continue
 
         sku = label
