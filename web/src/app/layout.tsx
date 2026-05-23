@@ -1,14 +1,12 @@
 import type { Metadata } from 'next';
-import { Fraunces } from 'next/font/google';
-import { GeistSans } from 'geist/font/sans';
-import { GeistMono } from 'geist/font/mono';
+import { Inter } from 'next/font/google';
 import './globals.css';
 import { QueryProvider } from '@/components/query-provider';
 import { AppShell } from '@/components/app-shell';
 
-const fraunces = Fraunces({
+const inter = Inter({
   subsets: ['latin'],
-  variable: '--font-fraunces',
+  variable: '--font-inter',
   weight: ['400', '500', '600', '700'],
   display: 'swap',
 });
@@ -20,10 +18,7 @@ export const metadata: Metadata = {
 
 export default function RootLayout({ children }: { children: React.ReactNode }) {
   return (
-    <html
-      lang="es"
-      className={`${fraunces.variable} ${GeistSans.variable} ${GeistMono.variable}`}
-    >
+    <html lang="es" className={inter.variable}>
       <body className="min-h-screen bg-cream text-ink antialiased">
         <QueryProvider>
           <AppShell>{children}</AppShell>

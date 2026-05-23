@@ -65,37 +65,63 @@ export function SavedChartsGrid({
 
   if (list.isLoading) {
     return (
-      <div className="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-3">
-        {Array.from({ length: 3 }).map((_, i) => (
-          <Skeleton key={i} className="h-72" />
-        ))}
-      </div>
+      <section className="space-y-4">
+        <GridHeader count={null} />
+        <div className="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-3">
+          {Array.from({ length: 3 }).map((_, i) => (
+            <Skeleton key={i} className="h-72" />
+          ))}
+        </div>
+      </section>
     );
   }
 
   const charts = list.data?.charts ?? [];
   if (charts.length === 0) {
     return (
-      <Card>
-        <div className="px-6 py-10 text-center text-sm text-muted">
-          Todavía no has guardado ningún gráfico. Configúralo arriba y pulsa <b>Guardar</b>.
-        </div>
-      </Card>
+      <section className="space-y-4">
+        <GridHeader count={0} />
+        <Card>
+          <div className="px-6 py-10 text-center text-sm text-muted">
+            Todavía no has guardado ningún gráfico. Configúralo arriba y pulsa{' '}
+            <b>Guardar gráfico</b>.
+          </div>
+        </Card>
+      </section>
     );
   }
   return (
-    <div className="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-3">
-      {charts.map((c) => (
-        <SavedCard
-          key={c.id}
-          chart={c}
-          measures={metricas.data?.measures ?? []}
-          onEdit={onEdit ? () => onEdit(c) : undefined}
-          onDelete={() => {
-            if (window.confirm(`¿Eliminar "${c.nombre}"?`)) remove.mutate(c.id);
-          }}
-        />
-      ))}
+    <section className="space-y-4">
+      <GridHeader count={charts.length} />
+      <div className="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-3">
+        {charts.map((c) => (
+          <SavedCard
+            key={c.id}
+            chart={c}
+            measures={metricas.data?.measures ?? []}
+            onEdit={onEdit ? () => onEdit(c) : undefined}
+            onDelete={() => {
+              if (window.confirm(`¿Eliminar "${c.nombre}"?`)) remove.mutate(c.id);
+            }}
+          />
+        ))}
+      </div>
+    </section>
+  );
+}
+
+function GridHeader({ count }: { count: number | null }) {
+  return (
+    <div className="flex items-end justify-between gap-6 border-b border-hairline pb-3">
+      <div>
+        <div className="eyebrow text-ink-3">Tus gráficos guardados</div>
+        <p className="mt-1 text-xs text-ink-3">
+          Edita o elimina desde el menú <span className="text-ink">⋯</span> de cada tarjeta.
+        </p>
+      </div>
+      <span className="text-[11px] uppercase tracking-wider text-ink-4 num">
+        {count === null ? '…' : `${count} ${count === 1 ? 'gráfico' : 'gráficos'}`}
+      </span>
     </div>
   );
 }

@@ -20,9 +20,8 @@
 html, body {
   background: var(--bg);
   color: var(--ink);
-  font-family: var(--font-geist-sans), system-ui, -apple-system, sans-serif;
+  font-family: var(--font-inter), system-ui, -apple-system, sans-serif;
   -webkit-font-smoothing: antialiased;
-  font-feature-settings: 'ss01', 'cv11';
 }
 
 /* Subtle grain texture on the canvas — adds the editorial paper feel */
@@ -47,8 +46,7 @@ body {
 }
 
 .serif {
-  font-family: var(--font-fraunces), Georgia, serif;
-  font-feature-settings: 'ss01', 'ss02';
+  font-family: var(--font-inter), system-ui, sans-serif;
 }
 
 .eyebrow {
