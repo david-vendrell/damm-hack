@@ -5,18 +5,32 @@
 :root {
   --bg: #F5F1EA;
   --surface: #FFFFFF;
-  --ink: #1A1A1A;
-  --muted: #6B6B6B;
-  --hairline: #E6E0D6;
+  --linen: #EFE9DE;
+  --ink: #171513;
+  --ink-2: #3A3631;
+  --ink-3: #6E665B;
+  --muted: #6E665B;
+  --hairline: #E8E1D3;
+  --hairline-strong: #D6CDB9;
   --damm: #A4161A;
+  --gold: #C99700;
+  --moss: #3F7A52;
 }
 
 html, body {
   background: var(--bg);
   color: var(--ink);
-  font-family: 'Inter', system-ui, -apple-system, sans-serif;
+  font-family: var(--font-geist-sans), system-ui, -apple-system, sans-serif;
   -webkit-font-smoothing: antialiased;
-  font-feature-settings: 'cv11', 'ss01', 'ss03';
+  font-feature-settings: 'ss01', 'cv11';
+}
+
+/* Subtle grain texture on the canvas — adds the editorial paper feel */
+body {
+  background-image:
+    radial-gradient(circle at 0% 0%, rgba(164, 22, 26, 0.03), transparent 50%),
+    radial-gradient(circle at 100% 100%, rgba(201, 151, 0, 0.025), transparent 55%);
+  background-attachment: fixed;
 }
 
 * {
@@ -29,4 +43,111 @@ html, body {
 
 .num {
   font-variant-numeric: tabular-nums;
+  font-feature-settings: 'tnum', 'ss01';
+}
+
+.serif {
+  font-family: var(--font-fraunces), Georgia, serif;
+  font-feature-settings: 'ss01', 'ss02';
+}
+
+.eyebrow {
+  font-size: 0.6875rem;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  font-weight: 500;
+  color: var(--ink-3);
+}
+
+/* Pill badge — Dribbble-style dark delta */
+.delta-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  padding: 2px 7px;
+  border-radius: 999px;
+  font-size: 0.6875rem;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  line-height: 1;
+  background: var(--ink);
+  color: var(--surface);
+  letter-spacing: -0.01em;
+}
+
+.delta-pill.up { background: var(--moss); }
+.delta-pill.down { background: var(--damm); }
+.delta-pill.flat { background: var(--ink-3); }
+
+/* Hairline underline that animates on hover — used by sidebar nav */
+.nav-item {
+  position: relative;
+}
+.nav-item::before {
+  content: '';
+  position: absolute;
+  left: 0;
+  top: 50%;
+  transform: translateY(-50%) scaleY(0);
+  width: 2px;
+  height: 70%;
+  background: var(--damm);
+  border-radius: 2px;
+  transition: transform 240ms cubic-bezier(0.2, 0.7, 0.2, 1);
+}
+.nav-item[data-active='true']::before {
+  transform: translateY(-50%) scaleY(1);
+}
+
+/* Scrollbar — refined, only on hover */
+::-webkit-scrollbar { width: 10px; height: 10px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb {
+  background: transparent;
+  border-radius: 999px;
+  border: 2px solid transparent;
+  background-clip: padding-box;
+}
+*:hover::-webkit-scrollbar-thumb {
+  background: var(--hairline-strong);
+  background-clip: padding-box;
+  border: 2px solid transparent;
+}
+
+/* Focus ring */
+*:focus-visible {
+  outline: 2px solid var(--damm);
+  outline-offset: 2px;
+  border-radius: 4px;
+}
+
+/* Decorative diagonal hatch — used on hero callouts to evoke beer-label craft */
+.hatch {
+  background-image: repeating-linear-gradient(
+    -45deg,
+    var(--hairline) 0,
+    var(--hairline) 1px,
+    transparent 1px,
+    transparent 6px
+  );
+}
+
+.hatch-gold {
+  background-image: repeating-linear-gradient(
+    -45deg,
+    rgba(201, 151, 0, 0.18) 0,
+    rgba(201, 151, 0, 0.18) 1px,
+    transparent 1px,
+    transparent 6px
+  );
+}
+
+.hatch-damm {
+  background-image: repeating-linear-gradient(
+    -45deg,
+    rgba(164, 22, 26, 0.14) 0,
+    rgba(164, 22, 26, 0.14) 1px,
+    transparent 1px,
+    transparent 6px
+  );
 }

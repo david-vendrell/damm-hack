@@ -164,6 +164,7 @@ def main() -> None:
             o.sku                                             AS sku,
             o.marca, o.supramarca, o.cbr, o.familia, o.cerveza,
             o.envase, o.tipo_envase,
+            o.definicion_de_turno                             AS turno,
             o.oee, o.disponibilidad, o.rendimiento, o.ineficiencia,
             o.cambios_bool                                    AS hubo_cambio,
             v.uds, v.hl,

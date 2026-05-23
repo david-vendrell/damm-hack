@@ -305,7 +305,7 @@ function Resultados({ a }: { a: AnalisisUrgencia }) {
 
       {/* KPIs */}
       <section className={cn('grid gap-4', a.modo === 'plan_activo' ? 'grid-cols-2 md:grid-cols-4' : 'grid-cols-2')}>
-        <KPI label="Hl en riesgo" value={hl(a.kpis.hlEnRiesgo)} accent />
+        <KPI label="Hl en riesgo" value={hl(a.kpis.hlEnRiesgo)} accent="damm" />
         {a.modo === 'plan_activo' && (
           <>
             <KPI label="OEE plan original" value={pct(a.kpis.oeePlanOriginal ?? 0)} />

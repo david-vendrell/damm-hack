@@ -84,6 +84,16 @@ model PlanItem {
   hlPlan    Float
 }
 
+model SavedChart {
+  id       String   @id @default(cuid())
+  nombre   String
+  config   String
+  creadoEn DateTime @default(now())
+  actualEn DateTime @updatedAt
+
+  @@index([creadoEn])
+}
+
 model OfHecho {
   of              String   @id
   fechaFin        DateTime
@@ -107,6 +117,9 @@ model OfHecho {
   hTotales        Float?
   hMarcha         Float?
   hParo           Float?
+  hPnp            Float?
+  hLimpieza       Float?
+  hIdle           Float?
   hBajaVelocidad  Float?
   hSaturacionSal  Float?
   hFaltaProducto  Float?

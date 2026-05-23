@@ -143,21 +143,139 @@ export interface ObservabilidadKpis {
   oee: number;
   disponibilidad: number;
   rendimiento: number;
+  ineficiencia: number;
+  utilizacion: number;
   volumenHl: number;
   volumenUds: number;
   ofs: number;
   pctCambios: number;
+  // Changeover
+  horasCambio: number;
+  horasCambioPorOfCambio: number;
+  deltaTeoricoMin: number;
+  // Mantenimiento
+  nLlamadasMant: number;
+  horasMantenimiento: number;
+  pctTiempoMant: number;
+  // Plan vs Actual (May 2026)
+  planHl: number;
+  actualHl: number;
+  fillRate: number;
+  nOnlyPlan: number;
+  nOnlyActual: number;
+  // Limpieza / CIP
+  nLimpiezaWos: number;
+  horasLimpieza: number;
+  pctTiempoCip: number;
+}
+
+export interface CambioPorLineaItem {
+  linea: 14 | 17 | 19;
+  horasCambio: number;
+  nCambios: number;
+  horasCambioPorOf: number;
+  realMin: number;
+  teoricoMin: number;
+  deltaMin: number;
+}
+
+export interface PlanVsActualFila {
+  linea: 14 | 17 | 19;
+  sku: string;
+  denominacion: string | null;
+  hlPlan: number;
+  hlActual: number;
+  gapHl: number;
+  estado: 'matched' | 'only_plan' | 'only_actual';
+}
+
+export interface LimpiezaPorLineaItem {
+  linea: 14 | 17 | 19;
+  nWos: number;
+  horas: number;
+  horasIntervencion: number;
+}
+
+export interface SerieMensualLinea {
+  mes: number;
+  valor: number;
+  porLinea: Partial<Record<14 | 17 | 19, number>>;
+}
+
+export interface PerdidasPorLineaItem {
+  linea: 14 | 17 | 19;
+  conceptos: { concepto: string; horas: number }[];
+}
+
+export interface UtilizacionLineaItem {
+  linea: 14 | 17 | 19;
+  marcha: number;
+  paro: number;
+  totales: number;
+  pct: number;
+}
+
+export interface OeeDistribucionBucket {
+  bucket: string;
+  desde: number;
+  hasta: number;
+  total: number;
+  porLinea: Partial<Record<14 | 17 | 19, number>>;
+}
+
+export interface CambiosImpactoItem {
+  linea: 14 | 17 | 19;
+  oeeConCambio: number;
+  oeeSinCambio: number;
+  deltaPts: number;
+  nCon: number;
+  nSin: number;
+}
+
+export interface ParetoPerdidasItem {
+  concepto: string;
+  horas: number;
+  acumuladoPct: number;
+}
+
+export interface PeorOf {
+  of: string;
+  fecha: string;
+  linea: 14 | 17 | 19;
+  sku: string;
+  marca: string | null;
+  formato: string | null;
+  oee: number;
+  hl: number;
 }
 
 export interface ObservabilidadData {
   kpis: ObservabilidadKpis;
   oeePorLinea: { linea: 14 | 17 | 19; oee: number }[];
   oeePorFormato: { formato: string; oee: number }[];
+  oeePorFamilia: { familia: string; oee: number; hl: number }[];
+  oeePorCanal: { canal: string; oee: number; hl: number }[];
+  oeePorTipoEnvase: { tipoEnvase: string; oee: number; hl: number }[];
   oeeMensual: { mes: number; oee: number; oeePorLinea: Partial<Record<14 | 17 | 19, number>> }[];
   oeeSemanal: { semana: number; oee: number; oeePorLinea: Partial<Record<14 | 17 | 19, number>> }[];
+  dispMensual: SerieMensualLinea[];
+  rendMensual: SerieMensualLinea[];
+  hlMensual: { mes: number; hl: number; porLinea: Partial<Record<14 | 17 | 19, number>> }[];
   topMarcas: { marca: string; ofs: number; oee: number }[];
   perdidasTiempo: { concepto: string; horas: number }[];
+  perdidasPorLinea: PerdidasPorLineaItem[];
+  utilizacionPorLinea: UtilizacionLineaItem[];
+  oeeDistribucion: OeeDistribucionBucket[];
+  cambiosImpacto: CambiosImpactoItem[];
+  paretoPerdidas: ParetoPerdidasItem[];
+  topPeoresOfs: PeorOf[];
   rangoFechas: { desde: string; hasta: string } | null;
+  cambioPorLinea: CambioPorLineaItem[];
+  planVsActual: {
+    totales: { hlPlan: number; hlActual: number; nMatched: number; nOnlyPlan: number; nOnlyActual: number };
+    topGap: PlanVsActualFila[];
+  };
+  limpiezaPorLinea: LimpiezaPorLineaItem[];
 }
 
 export interface ObservabilidadDimensiones {
@@ -166,4 +284,131 @@ export interface ObservabilidadDimensiones {
   marcas: string[];
   formatos: string[];
   canales: string[];
+  turnos?: string[];
+}
+
+// ---- Generic Mixpanel-style query ----
+
+export type MeasureKey =
+  | 'oee'
+  | 'disp'
+  | 'rend'
+  | 'inef'
+  | 'hl'
+  | 'uds'
+  | 'ofs'
+  | 'pctCambios'
+  | 'utilizacion'
+  | 'hTotales'
+  | 'hMarcha'
+  | 'hParo'
+  | 'hPnp'
+  | 'hLimpieza'
+  | 'hIdle'
+  | 'hBajaVelocidad'
+  | 'hSaturacionSal'
+  | 'hFaltaProducto'
+  | 'hCip'
+  | 'hEsterilizacion'
+  | 'hCambio'
+  | 'nLlamadasMant'
+  | 'hMantenimiento'
+  | 'hEsperaMant'
+  | 'nDimsCambiadas'
+  | 'frecCambio';
+
+export type DimensionKey =
+  | 'mes'
+  | 'semanaIso'
+  | 'fechaFin'
+  | 'dia'
+  | 'semana'
+  | 'mesIso'
+  | 'linea'
+  | 'formato'
+  | 'marca'
+  | 'familia'
+  | 'tipoEnvase'
+  | 'canal'
+  | 'sku'
+  | 'cambioPrincipal'
+  | 'turno'
+  | 'causaParo';
+
+export type MeasureKind = 'pct' | 'count' | 'hours' | 'hl' | 'units';
+
+export type Aggregation = 'sum' | 'avg' | 'median' | 'count' | 'min' | 'max' | 'p90';
+
+export interface MeasureMeta {
+  key: MeasureKey;
+  label: string;
+  kind: MeasureKind;
+  defaultAgg: Aggregation;
+  allowedAggs: Aggregation[];
+}
+
+export interface DimensionMeta {
+  key: DimensionKey;
+  label: string;
+  temporal: boolean;
+}
+
+export interface Filter {
+  dim: DimensionKey;
+  values: string[];
+}
+
+export type Granularity = 'day' | 'week' | 'month';
+
+export interface DateRange {
+  from?: string;
+  to?: string;
+  preset?: '7d' | '30d' | '90d' | 'ytd' | 'y2025' | 'y2024' | 'all';
+}
+
+export type VizType = 'auto' | 'line' | 'bar' | 'stackedBar' | 'donut' | 'bigNumber' | 'table';
+
+export interface ChartConfig {
+  measure: MeasureKey;
+  aggregation: Aggregation;
+  dimension?: DimensionKey;
+  breakdown?: DimensionKey;
+  filters: Filter[];
+  dateRange: DateRange;
+  granularity: Granularity;
+  viz: VizType;
+  topN?: number;
+}
+
+export interface QueryRow {
+  key: string;
+  label: string;
+  value: number;
+  breakdown?: Record<string, number>;
+}
+
+export interface DataQuality {
+  excludedOutliers: number;
+  excludedOeeGt1: number;
+  rowsConsidered: number;
+}
+
+export interface QueryResult {
+  measure: MeasureKey;
+  dimension?: DimensionKey;
+  breakdown?: DimensionKey;
+  aggregation: Aggregation;
+  rows: QueryRow[];
+  breakdownKeys: string[];
+  dataQuality: DataQuality;
+  total?: number;
+  previousTotal?: number;
+}
+
+export interface SavedChartDTO {
+  id: string;
+  nombre: string;
+  config: ChartConfig;
+  creadoEn: string;
+  actualEn: string;
 }

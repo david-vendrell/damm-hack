@@ -104,7 +104,7 @@ export function ValidarView() {
 function ResumenPlan({ analisis, recos, onReset }: { analisis: AnalisisPlan; recos?: PlanRecomendado; onReset: () => void }) {
   return (
     <section className="grid grid-cols-1 gap-4 md:grid-cols-4">
-      <KPI label="OEE previsto del plan" value={pct(analisis.oeePrevistoPlan)} hint={analisis.nombre} accent />
+      <KPI label="OEE previsto del plan" value={pct(analisis.oeePrevistoPlan)} hint={analisis.nombre} accent="damm" />
       <KPI label="Pérdida evitable" value={`${analisis.perdidaEvitablePts.toFixed(1)} pts`} hint="vs. correr cada OF en su alcanzable" />
       <KPI label="Banderas" value={`${analisis.banderas.evitar} / ${analisis.banderas.revisar} / ${analisis.banderas.procede}`} hint="evitar · revisar · procede" />
       <div className="rounded-soft border border-hairline bg-surface px-5 py-4">
