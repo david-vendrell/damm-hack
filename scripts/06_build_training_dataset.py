@@ -77,6 +77,10 @@ def main() -> None:
             r.hl,
             r.uds,
             r.oee,
+            r.disponibilidad,
+            r.rendimiento,
+            (1.0 - COALESCE(r.ineficiencia, 0.0)) AS calidad,
+            r.horas_cambio * 60.0           AS actual_cambio_min,
             r.estado_volumen,
             r.cambio_tipo_principal,
             r.hubo_cambio,
@@ -145,6 +149,11 @@ def main() -> None:
     df = df.merge(matrix, how="left",
                   on=["linea", "prev_estado_volumen", "estado_volumen"])
     print("==> Teórico cambio: joined CF Prat matrix")
+
+    # Gap 3 — changeover variance (actual − theoretical). Captures chronic
+    # changeover overruns per (línea, transition).
+    df["changeover_variance_min"] = df["actual_cambio_min"] - df["teorico_cambio_min"]
+    print("==> Changeover variance: actual − theoretical (Gap 3)")
 
     # ============================================================ Hours since
     # last time same format / same sku ran on this line (strictly past)
