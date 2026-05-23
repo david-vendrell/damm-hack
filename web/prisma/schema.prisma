@@ -1,0 +1,121 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+model Sku {
+  codigo    String             @id
+  nombre    String
+  marca     String
+  formato   String
+  baselines SkuLineaBaseline[]
+}
+
+model SkuLineaBaseline {
+  id            Int    @id @default(autoincrement())
+  sku           Sku    @relation(fields: [skuCodigo], references: [codigo])
+  skuCodigo     String
+  linea         Int
+  oeeMediana    Float
+  oeeAlcanzable Float
+  rateHlH       Float
+  nRuns         Int
+
+  @@unique([skuCodigo, linea])
+}
+
+model ChangeoverTime {
+  id            Int    @id @default(autoincrement())
+  linea         Int
+  estadoOrigen  String
+  estadoDestino String
+  minutos       Int
+
+  @@unique([linea, estadoOrigen, estadoDestino])
+}
+
+model CambioIneficiente {
+  id            Int    @id @default(autoincrement())
+  of            String
+  linea         Int
+  fecha         String
+  skuAnterior   String
+  skuActual     String
+  tipoCambio    String
+  oeeReal       Float
+  oeeAlcanzable Float
+  ptsPerdidos   Float
+  motivo        String
+}
+
+model OeeObservacion {
+  id        Int    @id @default(autoincrement())
+  skuCodigo String
+  linea     Int
+  oee       Float
+}
+
+model Mantenimiento {
+  id     Int    @id @default(autoincrement())
+  linea  Int
+  dia    String
+  motivo String
+}
+
+model Plan {
+  id       String     @id @default(cuid())
+  nombre   String
+  creadoEn DateTime   @default(now())
+  items    PlanItem[]
+}
+
+model PlanItem {
+  id        Int    @id @default(autoincrement())
+  plan      Plan   @relation(fields: [planId], references: [id])
+  planId    String
+  linea     Int
+  secuencia Int
+  dia       String
+  sku       String
+  hlPlan    Float
+}
+
+model OfHecho {
+  of              String   @id
+  fechaFin        DateTime
+  anio            Int
+  mes             Int
+  semanaIso       Int
+  linea           Int
+  sku             String
+  marca           String?
+  familia         String?
+  tipoEnvase      String?
+  formato         String?
+  canal           String?
+  oee             Float
+  disp            Float
+  rend            Float
+  inef            Float?
+  hl              Float
+  uds             Float
+  tieneCambio     Boolean
+  hTotales        Float?
+  hMarcha         Float?
+  hParo           Float?
+  hBajaVelocidad  Float?
+  hSaturacionSal  Float?
+  hFaltaProducto  Float?
+  hCip            Float?
+  hEsterilizacion Float?
+
+  @@index([anio, linea])
+  @@index([marca])
+  @@index([formato])
+  @@index([canal])
+  @@index([fechaFin])
+}

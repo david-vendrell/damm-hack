@@ -1,0 +1,32 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  --bg: #F5F1EA;
+  --surface: #FFFFFF;
+  --ink: #1A1A1A;
+  --muted: #6B6B6B;
+  --hairline: #E6E0D6;
+  --damm: #A4161A;
+}
+
+html, body {
+  background: var(--bg);
+  color: var(--ink);
+  font-family: 'Inter', system-ui, -apple-system, sans-serif;
+  -webkit-font-smoothing: antialiased;
+  font-feature-settings: 'cv11', 'ss01', 'ss03';
+}
+
+* {
+  border-color: var(--hairline);
+}
+
+.hairline {
+  border: 1px solid var(--hairline);
+}
+
+.num {
+  font-variant-numeric: tabular-nums;
+}
