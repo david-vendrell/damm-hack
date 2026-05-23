@@ -144,7 +144,8 @@ def _per_line_compare_table_v2(per_line: dict, objective: str) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
-def _per_day_factory_table(per_day: list[dict], objective: str) -> pd.DataFrame:
+def _per_day_factory_table(per_day: list[dict], objective: str,
+                           maintenance_per_day: dict | None = None) -> pd.DataFrame:
     """Factory-wide (3 líneas combinadas) HL-weighted OEE per día.
 
     Recommended view: no Simpson's paradox here because the weighting is
@@ -152,11 +153,14 @@ def _per_day_factory_table(per_day: list[dict], objective: str) -> pd.DataFrame:
     """
     if not per_day:
         return pd.DataFrame(columns=["Día", "Bloques (act→opt)", "HL del día",
-                                     f"OEE actual ({objective})", "OEE optimizada", "Δ pts"])
+                                     f"OEE actual ({objective})", "OEE optimizada",
+                                     "Δ pts", "Mantenimiento"])
     rows = []
     day_names_es = {0: "Lun", 1: "Mar", 2: "Mié", 3: "Jue", 4: "Vie", 5: "Sáb", 6: "Dom"}
+    maintenance_per_day = maintenance_per_day or {}
     for d in per_day:
         dt = pd.Timestamp(d["fecha"])
+        mant_badge = maintenance_per_day.get(d["fecha"], "")
         rows.append({
             "Día":                          f"{day_names_es[dt.weekday()]} {d['fecha']}",
             "Bloques (act→opt)":            f"{d['n_blocks_baseline']} → {d['n_blocks_optimized']}",
@@ -164,8 +168,32 @@ def _per_day_factory_table(per_day: list[dict], objective: str) -> pd.DataFrame:
             f"OEE actual ({objective})":    _fmt_pct(d["baseline"]),
             "OEE optimizada":               _fmt_pct(d["optimized"]),
             "Δ pts":                        f"{d['delta_pts']:+.2f}",
+            "Mantenimiento":                mant_badge,
         })
     return pd.DataFrame(rows)
+
+
+def _maintenance_per_day(per_day: list[dict]) -> dict[str, str]:
+    """For each día in per_day, return a short Spanish badge listing the
+    scheduled CF Prat events on that día. e.g. `🛠 L17 LIMPIEZA · L19 LIMPIEZA`.
+    """
+    if not per_day:
+        return {}
+    from engine.maintenance_blocker import projected_blocked_slots, load_schedule
+    sched = load_schedule(ROOT / "lookups")
+    if sched.empty:
+        return {}
+    fechas = [pd.Timestamp(d["fecha"]).date() for d in per_day]
+    blocks = projected_blocked_slots(fechas, schedule=sched)
+    out: dict[str, str] = {}
+    for d in per_day:
+        f_iso = d["fecha"]
+        f_date = pd.Timestamp(f_iso).date()
+        events = sorted(
+            {f"L{b.linea} {b.event_type}" for b in blocks if b.fecha == f_date}
+        )
+        out[f_iso] = "🛠 " + " · ".join(events) if events else ""
+    return out
 
 
 def _swap_log_v3_table(swap_log: list[dict]) -> pd.DataFrame:
@@ -211,6 +239,49 @@ def predict(file_obj):
     week_p90 = _factory_wide_oee(preds, "p90")
     total_hl = int(preds["hl"].sum()) if "hl" in preds.columns else 0
     src = meta["source"]
+
+    # OEE decomposition (Disp × Rend × Cal) — only present if multi-label
+    # models have been trained (Gap 1). Falls back silently if absent.
+    decomp_md = ""
+    if all(f"{p}_p50" in preds.columns for p in ("disp", "rend", "cal")):
+        disp = _factory_wide_oee(preds, "disp_p50")
+        rend = _factory_wide_oee(preds, "rend_p50")
+        cal  = _factory_wide_oee(preds, "cal_p50")
+        product = disp * rend * cal
+        decomp_md = (
+            f"\n\n#### 🔬 Decomposición OEE (Damm formula: OEE = Disp × Rend × Cal)\n"
+            f"| Componente       | Predicho (HL-pond p50) |\n"
+            f"|------------------|-----------------------:|\n"
+            f"| **Disponibilidad** | **{_fmt_pct(disp)}** |\n"
+            f"| **Rendimiento**    | **{_fmt_pct(rend)}** |\n"
+            f"| **Calidad**        | **{_fmt_pct(cal)}** |\n"
+            f"| Producto Disp×Rend×Cal | {_fmt_pct(product)} |\n"
+            f"| OEE compuesto (modelo) | {_fmt_pct(week_p50)} |\n\n"
+            f"> Las dos últimas filas no son idénticas porque cada componente se "
+            f"entrena como un modelo aparte; usa el OEE compuesto como número "
+            f"operativo, y la decomposición como diagnóstico de **qué está "
+            f"bajando** (downtime ↓ Disponibilidad, ritmo lento ↓ Rendimiento, "
+            f"rechazos ↓ Calidad).\n"
+        )
+
+    # Maintenance-conflict breakdown
+    mant_md = ""
+    if "feas_reason" in preds.columns:
+        mant_rows = preds[
+            preds["feas_reason"].astype(str).str.contains("LIMPIEZA|MANTENIMIENTO", na=False)
+        ]
+        if len(mant_rows):
+            unique_conflicts = mant_rows[["linea", "fecha", "turno", "feas_reason"]].drop_duplicates(
+                subset=["linea", "fecha", "turno"]
+            )
+            n_unique_slots = len(unique_conflicts)
+            mant_md = (
+                f"\n\n> 🛠️ **{len(mant_rows)} OFs en {n_unique_slots} slots "
+                f"coinciden con mantenimiento programado** (CF Prat 5-TURNOS).  "
+                f"Estos OFs aparecen marcados como infactibles abajo — el optimizador "
+                f"los reubicará automáticamente en slots libres.\n"
+            )
+
     warning = ""
     if meta.get("warnings"):
         warning = "\n\n> ⚠️ " + " ".join(meta["warnings"])
@@ -229,7 +300,7 @@ def predict(file_obj):
 > Estos números son la OEE de la **fábrica como conjunto** (HL-ponderada
 > sobre las 3 líneas). La tabla *Resumen por línea* desglosa los mismos
 > números por L14 / L17 / L19 para diagnóstico.
-{warning}
+{decomp_md}{mant_md}{warning}
 """.strip()
 
     return (summary_md, _line_summary(preds), _block_table(preds), _top_drivers_table(preds))
@@ -264,6 +335,24 @@ def optimize_v3(file_obj, aggressive: bool, progress=gr.Progress(track_tqdm=Fals
     per_day   = result.get("per_day", [])
     per_line  = result.get("per_line", {})
 
+    # Maintenance summary: how many slots blocked & did the optimizer respect them?
+    mant_per_day = _maintenance_per_day(per_day)
+    n_mant_days  = sum(1 for v in mant_per_day.values() if v)
+    mant_violations = result["audit"].get("maintenance_violations", [])
+    mant_line = ""
+    if n_mant_days:
+        if mant_violations:
+            mant_line = (
+                f"- 🛠 **{n_mant_days} día(s) con mantenimiento programado**  ·  "
+                f"⚠️ {len(mant_violations)} OF(s) siguen en slot bloqueado "
+                f"(el optimizador no pudo recolocarlos — formato/historia incompatible)"
+            )
+        else:
+            mant_line = (
+                f"- 🛠 **{n_mant_days} día(s) con mantenimiento programado** "
+                f"(LIMPIEZA / MANTENIMIENTO) — todos los OFs respetan los slots bloqueados ✅"
+            )
+
     progress(0.95, desc="Generando resumen…")
     status_emoji = "✅" if audit_ok else "⚠️"
 
@@ -293,6 +382,7 @@ def optimize_v3(file_obj, aggressive: bool, progress=gr.Progress(track_tqdm=Fals
 - **{n_changes}** reasignaciones aplicadas en **{elapsed:.1f} s**  {status_emoji}
 - **{total_hl:,} HL** totales planificados (sin cambio — volumen fijo)
 - Modo: **{obj_label}**
+{mant_line}
 
 #### Detalle operacional
 {weekly}
@@ -322,7 +412,7 @@ def optimize_v3(file_obj, aggressive: bool, progress=gr.Progress(track_tqdm=Fals
 """.strip()
 
     return (summary_md,
-            _per_day_factory_table(per_day, objective),
+            _per_day_factory_table(per_day, objective, _maintenance_per_day(per_day)),
             _per_line_compare_table_v2(per_line, objective),
             _swap_log_v3_table(result["swap_log"]))
 

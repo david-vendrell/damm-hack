@@ -384,6 +384,30 @@ def parse_planning_excel(
             dim_sku_parquet = candidate
 
     blocks = _attach_feasibility(blocks, feasibility_parquet, dim_sku_parquet)
+
+    # Maintenance-conflict check — uses the deterministic CF Prat schedule
+    # projected onto the planning window. Any block that lands on a scheduled
+    # LIMPIEZA / MANTENIMIENTO slot is marked infeasible with an explicit
+    # Spanish reason. Imported here (not at module top) to avoid an import
+    # cycle when callers extend the engine.
+    if not blocks.empty:
+        try:
+            from .maintenance_blocker import blocked_slot_map
+            lookups_dir = Path(feasibility_parquet).parent
+            fechas = sorted({pd.Timestamp(f).date() for f in blocks["fecha"]})
+            mmap = blocked_slot_map(fechas, lookups_dir=lookups_dir)
+            if mmap:
+                for idx, row in blocks.iterrows():
+                    key = (int(row["linea"]),
+                           pd.Timestamp(row["fecha"]).date(),
+                           str(row.get("turno") or "M"))
+                    bs = mmap.get(key)
+                    if bs is not None:
+                        blocks.at[idx, "feasible"]    = False
+                        blocks.at[idx, "feas_reason"] = bs.reason
+        except Exception as exc:
+            meta["warnings"].append(f"Maintenance check skipped: {exc}")
+
     meta["n_blocks"]            = int(len(blocks))
     meta["n_infeasible"]        = int((~blocks["feasible"]).sum())
     meta["n_low_confidence"]    = int((blocks["feasible"] & ~blocks["has_history"]).sum())

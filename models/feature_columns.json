@@ -56,6 +56,7 @@
     "same_packaging",
     "same_palet",
     "teorico_cambio_min",
+    "changeover_variance_min",
     "hours_since_same_format",
     "hours_since_same_sku",
     "sku_line_oee_p50_last_30d",
@@ -99,7 +100,12 @@
     "prev_tipo_envase",
     "prev_estado_volumen"
   ],
-  "target": "oee",
+  "labels": [
+    "oee",
+    "disponibilidad",
+    "rendimiento",
+    "calidad"
+  ],
   "alphas": [
     0.1,
     0.5,

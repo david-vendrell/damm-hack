@@ -40,6 +40,9 @@ class Slot:
     fecha: date
     turno: str                    # T / N / M
     capacity_blocks: int          # max # jobs (heuristic from history)
+    is_maintenance_blocked: bool = False    # CF Prat LIMPIEZA / MANTENIMIENTO
+    maintenance_event: str | None = None    # "LIMPIEZA" | "MANTENIMIENTO" | None
+    maintenance_reason: str | None = None   # human-readable Spanish for the UI
 
 
 # ============================================================
@@ -60,10 +63,19 @@ def line_in_feasible_set(job: Job, slot: Slot) -> bool:
     return slot.linea in job.feasible_lines
 
 
+def maintenance_ok(_job: Job, slot: Slot) -> bool:
+    """A slot reserved for a scheduled LIMPIEZA / MANTENIMIENTO cannot
+    accept any production OF — hard reject (Damm policy)."""
+    return not slot.is_maintenance_blocked
+
+
 def can_place(job: Job, slot: Slot) -> bool:
     """All the hard constraints excluding capacity (capacity is checked
     against the running assignment, not a static slot property)."""
-    return deadline_ok(job, slot) and format_ok(job, slot) and line_in_feasible_set(job, slot)
+    return (deadline_ok(job, slot)
+            and format_ok(job, slot)
+            and line_in_feasible_set(job, slot)
+            and maintenance_ok(job, slot))
 
 
 # ============================================================
@@ -110,6 +122,18 @@ def format_audit(assignment: dict[str, str], jobs_by_id: dict[str, Job],
     return out
 
 
+def maintenance_audit(assignment: dict[str, str],
+                      slots_by_id: dict[str, Slot]) -> list[tuple[str, str, str]]:
+    """Return [(job_id, slot_id, event_type)] for any OF placed on a slot
+    reserved for scheduled LIMPIEZA / MANTENIMIENTO."""
+    out = []
+    for jid, sid in assignment.items():
+        slot = slots_by_id[sid]
+        if slot.is_maintenance_blocked:
+            out.append((jid, sid, slot.maintenance_event or "MANT"))
+    return out
+
+
 def full_audit(
     blocks_before: pd.DataFrame,
     blocks_after: pd.DataFrame,
@@ -121,11 +145,14 @@ def full_audit(
     over_cap = capacity_audit(assignment, slots_by_id)
     bad_dl = deadline_audit(assignment, jobs_by_id, slots_by_id)
     bad_fmt = format_audit(assignment, jobs_by_id, slots_by_id)
+    bad_mnt = maintenance_audit(assignment, slots_by_id)
     return {
-        "hl_invariance_ok":   hl_ok,
-        "hl_max_abs_diff":    hl_diff,
-        "capacity_overruns":  over_cap,        # {} if all ok
-        "deadline_violations": bad_dl,         # [] if all ok
-        "format_violations":  bad_fmt,         # [] if all ok
-        "all_ok":             hl_ok and not over_cap and not bad_dl and not bad_fmt,
+        "hl_invariance_ok":     hl_ok,
+        "hl_max_abs_diff":      hl_diff,
+        "capacity_overruns":    over_cap,        # {} if all ok
+        "deadline_violations":  bad_dl,          # [] if all ok
+        "format_violations":    bad_fmt,         # [] if all ok
+        "maintenance_violations": bad_mnt,       # [] if all ok
+        "all_ok":               hl_ok and not over_cap and not bad_dl
+                                and not bad_fmt and not bad_mnt,
     }

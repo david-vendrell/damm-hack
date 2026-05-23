@@ -25,6 +25,7 @@ import pandas as pd
 
 from .build_features import build_feature_rows
 from .constraints import Job, Slot, can_place
+from .maintenance_blocker import blocked_slot_map
 from .parse_planning_excel import LINE_FORMAT_COMPAT, infer_estado_volumen_from_sku
 from .predict_oee import predict_blocks
 
@@ -102,15 +103,24 @@ def build_jobs_and_slots(
     latest   = max(j.deadline for j in jobs)
     days = [earliest + timedelta(days=i) for i in range((latest - earliest).days + 1 + extra_days_before_deadline)]
 
+    # Project the deterministic CF Prat maintenance schedule onto our planning
+    # window. Any (línea, fecha, turno) in this map gets capacity_blocks=0 +
+    # is_maintenance_blocked=True so `can_place()` will reject placement.
+    maint_map = blocked_slot_map(days, lookups_dir=lookups_dir)
+
     slots: list[Slot] = []
     for ln in (14, 17, 19):
         cap = int(cap_per_linea_day.get(ln, default_capacity))
         for d in days:
             for turno in ("T", "N", "M"):
+                blocked = maint_map.get((ln, d, turno))
                 slots.append(Slot(
                     slot_id=f"L{ln}|{d.isoformat()}|{turno}",
                     linea=ln, fecha=d, turno=turno,
-                    capacity_blocks=max(cap, 4),
+                    capacity_blocks=0 if blocked else max(cap, 4),
+                    is_maintenance_blocked=bool(blocked),
+                    maintenance_event=blocked.event_type if blocked else None,
+                    maintenance_reason=blocked.reason if blocked else None,
                 ))
 
     jobs_by_id = {j.job_id: j for j in jobs}

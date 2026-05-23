@@ -27,10 +27,19 @@ MODELS.mkdir(parents=True, exist_ok=True)
 # Quantiles to train
 ALPHAS = (0.10, 0.50, 0.90)
 
-# Columns that are NOT features (identifiers, target, helpers, leakage risks)
+# Labels we train models for (Gap 1 — OEE decomposition). Each label gets its
+# own 3-quantile family. The optimizer still maximises composite "oee"; the
+# decomposed labels are surfaced in the UI for explainability.
+LABELS = ("oee", "disponibilidad", "rendimiento", "calidad")
+
+# Columns that are NOT features (identifiers, target, helpers, leakage risks).
+# All label columns are excluded from feature sets regardless of which one is
+# being trained — they would all leak.
 EXCLUDE_COLS = {
     "of",        # identifier
     "oee",       # target
+    "disponibilidad", "rendimiento", "calidad",   # decomposed labels (leakage)
+    "actual_cambio_min",  # raw actual cambio time (leakage; variance feature is OK)
     "fecha",     # raw timestamp — calendar parts (dia_semana / mes / week_iso) are features
     "prev_fecha",
     "hl",        # quantity — keep as feature? actually keep, rename below
@@ -55,6 +64,7 @@ NUMERIC_HINT = {
     "hours_since_last_limpieza_on_line",
     "prev_oee",
     "hl",
+    "changeover_variance_min",   # Gap 3 — actual − theoretical changeover minutes
 }
 
 
@@ -84,14 +94,12 @@ def main() -> None:
     df = df.sort_values("fecha").reset_index(drop=True)
     print(f"==> Loaded {len(df)} rows × {df.shape[1]} cols from {TRAIN.name}")
 
-    y = df["oee"].clip(0.01, 1.0).astype(float)
     X, cat_cols, feature_cols = prepare_features(df)
     print(f"==> {len(feature_cols)} features ({len(cat_cols)} categorical, {len(feature_cols)-len(cat_cols)} numeric/bool)")
 
     # Time-ordered inner holdout for early stopping: last ~15 % of train as valid
     split = int(len(df) * 0.85)
     X_tr, X_val = X.iloc[:split], X.iloc[split:]
-    y_tr, y_val = y.iloc[:split], y.iloc[split:]
     print(f"==> Inner split: {len(X_tr)} fit / {len(X_val)} early-stop")
 
     common_params = dict(
@@ -105,45 +113,55 @@ def main() -> None:
         n_estimators=1500,
     )
 
-    models = {}
-    for alpha in ALPHAS:
-        print(f"\n==> Training α = {alpha:.2f} ...")
-        model = lgb.LGBMRegressor(
-            objective="quantile",
-            alpha=alpha,
-            **common_params,
-        )
-        model.fit(
-            X_tr, y_tr,
-            eval_set=[(X_val, y_val)],
-            eval_metric="quantile",
-            categorical_feature=cat_cols,
-            callbacks=[
-                lgb.early_stopping(stopping_rounds=50, verbose=False),
-                lgb.log_evaluation(period=0),
-            ],
-        )
-        models[alpha] = model
-        print(f"    best_iteration = {model.best_iteration_},  "
-              f"best_score = {model.best_score_['valid_0']['quantile']:.5f}")
+    # Train 4 labels × 3 quantiles = 12 LightGBM models. Labels are clipped to
+    # the valid [0.01, 1.0] interval so quantile loss is well-defined even when
+    # historical CALID. is a constant 1.0 (no rejects → degenerate quantile).
+    for label in LABELS:
+        if label not in df.columns:
+            print(f"\n!! WARN: label '{label}' not in training dataset — SKIPPED")
+            continue
+        y = df[label].clip(0.01, 1.0).astype(float)
+        y_tr, y_val = y.iloc[:split], y.iloc[split:]
+        print(f"\n========================================================")
+        print(f"   LABEL = {label}    (range {y.min():.3f}…{y.max():.3f}, mean {y.mean():.3f})")
+        print(f"========================================================")
 
-        # save
-        tag = f"p{int(alpha * 100):02d}"
-        out = MODELS / f"lgb_oee_{tag}.pkl"
-        with open(out, "wb") as f:
-            pickle.dump(model, f)
-        print(f"    saved → {out.relative_to(ROOT)}")
+        for alpha in ALPHAS:
+            print(f"  > α = {alpha:.2f} ...", end=" ", flush=True)
+            model = lgb.LGBMRegressor(
+                objective="quantile",
+                alpha=alpha,
+                **common_params,
+            )
+            model.fit(
+                X_tr, y_tr,
+                eval_set=[(X_val, y_val)],
+                eval_metric="quantile",
+                categorical_feature=cat_cols,
+                callbacks=[
+                    lgb.early_stopping(stopping_rounds=50, verbose=False),
+                    lgb.log_evaluation(period=0),
+                ],
+            )
+            best_score = model.best_score_['valid_0']['quantile']
+            print(f"best_iter={model.best_iteration_}  loss={best_score:.5f}")
 
-    # save feature schema
+            tag = f"p{int(alpha * 100):02d}"
+            out = MODELS / f"lgb_{label}_{tag}.pkl"
+            with open(out, "wb") as f:
+                pickle.dump(model, f)
+
+    # save feature schema (single schema serves all 12 models — same features)
     schema = {
         "feature_columns": feature_cols,
         "categorical_columns": cat_cols,
-        "target": "oee",
+        "labels": list(LABELS),
         "alphas": list(ALPHAS),
         "split_date": "2025-10-01",
     }
     (MODELS / "feature_columns.json").write_text(json.dumps(schema, indent=2, ensure_ascii=False))
     print(f"\n==> feature schema saved → models/feature_columns.json")
+    print(f"==> {len(LABELS) * len(ALPHAS)} models written to models/")
     print("==> Done.")
 
 

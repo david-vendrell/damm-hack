@@ -37,6 +37,7 @@ PLANS = [
     "04_infactible_formato.xlsx",
     "05_infactible_sin_historico.xlsx",
     "06_techo_optimo.xlsx",
+    "07_conflicto_mantenimiento.xlsx",
 ]
 
 
@@ -74,8 +75,22 @@ def run_one(name: str) -> dict:
     fac_p50 = _hl_weighted(preds, "p50")
     fac_p90 = _hl_weighted(preds, "p90")
     total_hl = int(blocks["hl"].sum())
+    # OEE decomposition if multi-label models are present
+    decomp = {}
+    if all(f"{p}_p50" in preds.columns for p in ("disp", "rend", "cal")):
+        decomp = {
+            "disp_p50": _hl_weighted(preds, "disp_p50"),
+            "rend_p50": _hl_weighted(preds, "rend_p50"),
+            "cal_p50":  _hl_weighted(preds, "cal_p50"),
+        }
     print(f"  factory p50 (HL-pond): {fac_p50*100:5.2f}%")
     print(f"  factory p90 (HL-pond): {fac_p90*100:5.2f}%")
+    if decomp:
+        print(f"  decomp (HL-pond p50):  "
+              f"Disp={decomp['disp_p50']*100:5.2f}%  "
+              f"Rend={decomp['rend_p50']*100:5.2f}%  "
+              f"Cal={decomp['cal_p50']*100:5.2f}%  "
+              f"(producto={decomp['disp_p50']*decomp['rend_p50']*decomp['cal_p50']*100:.2f}%)")
     print(f"  total HL planificados: {total_hl:,}")
 
     # --- optimize p90 aggressive
@@ -96,6 +111,7 @@ def run_one(name: str) -> dict:
         "n_infeasible":   meta["n_infeasible"],
         "n_low_conf":     meta["n_low_confidence"],
         "total_hl":       total_hl,
+        "decomp":         decomp,
         "factory_p50":    fac_p50,
         "factory_p90":    fac_p90,
         "optimized_p90":  opt_p90,
@@ -116,16 +132,23 @@ def write_report(rows: list[dict]) -> None:
         "## Resumen comparativo",
         "",
         "| # | Plan | Bloques | Infact. | Baja conf. | HL totales | "
-        "p50 (HL-pond) | p90 actual | p90 optimizada | Δ pts | Moves | t |",
-        "|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
+        "p50 (HL-pond) | p90 actual | p90 optimizada | Δ pts | Decomp Disp×Rend×Cal | Moves | t |",
+        "|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---|---:|---:|",
     ]
     for r in rows:
+        decomp_str = "—"
+        if r.get("decomp"):
+            d = r["decomp"]
+            decomp_str = (f"{d['disp_p50']*100:.0f}% × "
+                          f"{d['rend_p50']*100:.0f}% × "
+                          f"{d['cal_p50']*100:.0f}%")
         lines.append(
             f"| {r['name'].split('_')[0]} | `{r['name']}` | "
             f"{r['n_blocks']} | {r['n_infeasible']} | {r['n_low_conf']} | "
             f"{r['total_hl']:,} | "
             f"{r['factory_p50']*100:.1f}% | {r['factory_p90']*100:.1f}% | "
             f"{r['optimized_p90']*100:.1f}% | {r['delta_pts']:+.2f} | "
+            f"{decomp_str} | "
             f"{r['n_moves']} | {r['elapsed_sec']}s |"
         )
     # Compute PASS/FAIL flags
@@ -136,6 +159,7 @@ def write_report(rows: list[dict]) -> None:
     r04 = _f("04_infactible_formato.xlsx")
     r05 = _f("05_infactible_sin_historico.xlsx")
     r06 = _f("06_techo_optimo.xlsx")
+    r07 = _f("07_conflicto_mantenimiento.xlsx")
 
     def _yn(passed: bool) -> str:
         return "✅ PASS" if passed else "❌ FAIL"
@@ -152,11 +176,16 @@ def write_report(rows: list[dict]) -> None:
     # Infeasibility: 04 must have ≥1 infeasible
     infeas_ok = r04 and r04["n_infeasible"] >= 1
 
-    # No history: 05 must show low-confidence (the fake SKU) but NOT infeasible
-    nohist_ok = r05 and r05["n_low_conf"] > r01["n_low_conf"] and r05["n_infeasible"] == 0
+    # No history: 05 adds 1 low-conf SKU vs baseline; maintenance-driven
+    # infeasibles are equal because the same baseline slots collide either way.
+    nohist_ok = (r05 and r05["n_low_conf"] > r01["n_low_conf"]
+                 and r05["n_infeasible"] == r01["n_infeasible"])
 
     # Techo: 06 should already predict the HIGHEST baseline p90 of the set
     techo_baseline_top = r06 and all(r06["factory_p90"] >= r["factory_p90"] for r in rows if r is not r06)
+
+    # Maintenance: 07 adds 3 deliberate conflict OFs vs baseline → strictly more infeasibles
+    mant_ok = r07 and r07["n_infeasible"] > r01["n_infeasible"]
 
     lines += [
         "",
@@ -175,6 +204,12 @@ def write_report(rows: list[dict]) -> None:
         f"{_yn(nohist_ok)}  — {r05['n_low_conf']} bloques low-confidence "
         f"(incluye `ZZNEW01: no historical runs on any line`), "
         f"{r05['n_infeasible']} rechazos (correcto: formato desconocido => beneficio de la duda).",
+        f"- **07** (`conflicto_mantenimiento` detecta slots bloqueados por CF Prat): "
+        f"{_yn(mant_ok)}  — {r07['n_infeasible'] if r07 else 0} OFs marcados infactibles "
+        f"(vs {r01['n_infeasible'] if r01 else 0} en baseline; los +3 adicionales son los "
+        f"OFs que añadí deliberadamente). Razones del tipo: "
+        f"`Slot bloqueado: LIMPIEZA/MANTENIMIENTO programada en L17 los lunes (turno M, semanal, ~11.5h)`. "
+        f"Esquema 5-TURNOS del CF Prat.",
         f"- **06** (`techo_optimo` con baseline más alto del set): {_yn(techo_baseline_top)}  "
         f"— baseline {r06['factory_p90']*100:.2f}% es el más alto, "
         f"pero el optimizador igualmente encuentra +{r06['delta_pts']:.2f} pts "

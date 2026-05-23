@@ -177,6 +177,28 @@ def _infactible_sin_historico() -> list[dict]:
     return rows
 
 
+def _con_mantenimiento_conflict() -> list[dict]:
+    """Baseline + three OFs deliberately placed on slots blocked by the CF
+    Prat schedule:
+      · L17 Lunes turno M  ← LIMPIEZA semanal (blocked)
+      · L17 Lunes turno T  ← LIMPIEZA semanal (blocked, 11.5h overflow)
+      · L14 Viernes turno M ← LIMPIEZA semanal (blocked)
+
+    The parser should mark all three as infeasible with the explicit
+    `Slot bloqueado: LIMPIEZA programada ...` reason. The optimizer should
+    refuse to keep them in place and report `maintenance_violations=[]` after
+    relocation (or leave them flagged if no legal slot exists).
+
+    DAYS[0] = Monday (2026-05-25, iso_week 22 → even → QUINCENAL events also fire).
+    DAYS[4] = Friday (2026-05-29).
+    """
+    rows = _baseline_real()
+    rows.append(_sku_row(17, "ED13LTW", DAYS[0], "M", 900, 990))   # L17 Mon M — LIMPIEZA
+    rows.append(_sku_row(17, "ED13LTW", DAYS[0], "T", 900, 991))   # L17 Mon T — LIMPIEZA overflow
+    rows.append(_sku_row(14, "ED13LTMW", DAYS[4], "M", 800, 992))  # L14 Fri M — LIMPIEZA
+    return rows
+
+
 def _techo_optimo() -> list[dict]:
     """Each línea runs ONE marca all week, sequenced cleanly.
 
@@ -217,6 +239,7 @@ def main():
         ("04_infactible_formato.xlsx",       _infactible_formato),
         ("05_infactible_sin_historico.xlsx", _infactible_sin_historico),
         ("06_techo_optimo.xlsx",             _techo_optimo),
+        ("07_conflicto_mantenimiento.xlsx",  _con_mantenimiento_conflict),
     ]
 
     for name, gen in plans:

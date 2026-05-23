@@ -146,6 +146,17 @@ def build_feature_rows(
     # ============================================================ Teórico cambio
     out = out.merge(matrix, how="left", on=["linea", "prev_estado_volumen", "estado_volumen"])
 
+    # ============================================================ Changeover variance
+    # actual_cambio_min is only present at TRAIN time (pulled from fact_runs in
+    # scripts/06_build_training_dataset.py). At inference it's NaN, so the
+    # variance is also NaN — LightGBM treats missing values natively.
+    # Reading historical (actual − theoretical) gap teaches the model which
+    # transition/línea combinations chronically blow past their theoretical time.
+    if "actual_cambio_min" in out.columns:
+        out["changeover_variance_min"] = out["actual_cambio_min"] - out["teorico_cambio_min"]
+    else:
+        out["changeover_variance_min"] = float("nan")
+
     # ============================================================ hours_since features
     # Approximate using fact_runs_slim: time since last historical (linea, sku) and (linea, estado_volumen)
     fact_slim = fact_slim.copy()

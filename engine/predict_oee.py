@@ -17,14 +17,29 @@ MIN_HISTORICAL_RUNS_FOR_FEASIBILITY = 3
 
 @lru_cache(maxsize=1)
 def _load_artifacts(models_dir: str) -> dict:
+    """Load all (label × alpha) LightGBM models named `lgb_{label}_p{NN}.pkl`.
+
+    Backwards-compatible: pre-Gap-1 model dirs only have `lgb_oee_pNN.pkl`
+    files; we fall back to loading those alone and synthesise a single-label
+    schema if `labels` is absent from feature_columns.json.
+    """
     d = Path(models_dir)
     schema = json.loads((d / "feature_columns.json").read_text())
-    models = {}
-    for alpha in schema["alphas"]:
-        tag = f"p{int(alpha * 100):02d}"
-        with open(d / f"lgb_oee_{tag}.pkl", "rb") as f:
-            models[alpha] = pickle.load(f)
-    return {"schema": schema, "models": models}
+    labels = schema.get("labels") or [schema.get("target", "oee")]
+    models: dict[tuple[str, float], object] = {}
+    for label in labels:
+        for alpha in schema["alphas"]:
+            tag = f"p{int(alpha * 100):02d}"
+            path = d / f"lgb_{label}_{tag}.pkl"
+            if not path.exists():
+                # Pre-Gap-1 backwards compat: 'lgb_oee_pNN.pkl' was the only file.
+                if label == "oee":
+                    path = d / f"lgb_oee_{tag}.pkl"
+                if not path.exists():
+                    raise FileNotFoundError(f"Missing model file: {path}")
+            with open(path, "rb") as f:
+                models[(label, alpha)] = pickle.load(f)
+    return {"schema": schema, "models": models, "labels": labels}
 
 
 def _prepare_features(df: pd.DataFrame, feature_cols: list[str], cat_cols: list[str]) -> pd.DataFrame:
@@ -48,29 +63,48 @@ def predict_blocks(
     models_dir: str | Path = "models",
     top_k_shap: int = 3,
 ) -> pd.DataFrame:
-    """Return a DataFrame with columns added:
-        p10, p50, p90  — clipped to [0, 1]
-        top_features   — list[dict{name, shap}] of top |SHAP| features for p50
-        confidence     — 'high' | 'medium' | 'low' based on sku_line_n_runs
+    """Return a DataFrame with one column per (label × quantile) prediction:
+        p10, p50, p90              — composite OEE (backwards-compat aliases)
+        oee_p10/p50/p90            — composite OEE (new explicit names)
+        disp_p10/p50/p90           — Disponibilidad
+        rend_p10/p50/p90           — Rendimiento
+        cal_p10/p50/p90            — Calidad
+    plus `top_features` (SHAP for composite p50) and `confidence`.
     """
     if feature_df.empty:
-        return feature_df.assign(p10=[], p50=[], p90=[], top_features=[], confidence=[])
+        empty = {c: [] for c in ("p10","p50","p90","top_features","confidence")}
+        return feature_df.assign(**empty)
 
     artifacts = _load_artifacts(str(models_dir))
     schema = artifacts["schema"]
     models = artifacts["models"]
+    labels = artifacts["labels"]
     feat = schema["feature_columns"]
     cats = schema["categorical_columns"]
+
+    # Short alias prefix per label for output column names
+    LABEL_PREFIX = {
+        "oee": "oee",
+        "disponibilidad": "disp",
+        "rendimiento": "rend",
+        "calidad": "cal",
+    }
 
     X = _prepare_features(feature_df, feat, cats)
 
     out = feature_df.copy()
-    for alpha in (0.10, 0.50, 0.90):
-        tag = f"p{int(alpha * 100):02d}"
-        out[tag] = np.clip(models[alpha].predict(X), 0.0, 1.0)
+    for label in labels:
+        prefix = LABEL_PREFIX.get(label, label[:4])
+        for alpha in schema["alphas"]:
+            tag = f"p{int(alpha * 100):02d}"
+            preds = np.clip(models[(label, alpha)].predict(X), 0.0, 1.0)
+            out[f"{prefix}_{tag}"] = preds
+            # Backwards-compat: bare p10/p50/p90 mirror composite OEE
+            if label == "oee":
+                out[tag] = preds
 
-    # ============================================================ SHAP per row
-    p50 = models[0.50]
+    # ============================================================ SHAP per row (composite OEE p50)
+    p50 = models[("oee", 0.50)]
     shap_vals = p50.predict(X, pred_contrib=True)  # (n_rows, n_features+1)
     shap_arr = shap_vals[:, :-1]
     top_records: list[list[dict]] = []
