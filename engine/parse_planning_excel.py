@@ -28,6 +28,45 @@ import pandas as pd
 
 MIN_HISTORICAL_RUNS_FOR_FEASIBILITY = 3
 
+# ----------------------------------------------------------------- compat
+# Hard line-format compatibility per Damm (confirmed verbally 2026-05-23):
+#   L14 — produces 1/2 (50 cl) and 1/3 (33 cl)
+#   L17 — produces 1/3 (33 cl) only
+#   L19 — produces 1/2 (50 cl), 1/3 (33 cl), and 2/5 (44 cl)
+# Any (sku, línea) whose `estado_volumen` is not in the line's allowed set
+# is physically infeasible regardless of historical runs.
+LINE_FORMAT_COMPAT: dict[int, set[str]] = {
+    14: {"1/2", "1/3"},
+    17: {"1/3"},
+    19: {"1/2", "1/3", "2/5"},
+}
+
+
+def line_supports_format(linea: int, estado_volumen: str | None) -> bool:
+    if estado_volumen is None or pd.isna(estado_volumen):
+        return False
+    return str(estado_volumen) in LINE_FORMAT_COMPAT.get(int(linea), set())
+
+
+def infer_estado_volumen_from_sku(sku: str) -> str | None:
+    """Best-effort estado_volumen inference from a Damm SKU code.
+
+    Damm's standard naming has the format digits at positions 2-3:
+      ED13LTW → 1/3   (Estrella Damm 1/3)
+      ED12LTW → 1/2   (Estrella Damm 1/2)
+      VI25... → 2/5   (Victoria 2/5)
+    SKUs that don't follow the convention (e.g. internal codes like 3BN...)
+    return None and the platform falls back to dim_sku or skips the check.
+    """
+    if not sku:
+        return None
+    s = str(sku).upper()
+    # Look for explicit format digit pairs in positions 2-4
+    m = re.search(r"(?<![0-9])(13|12|25)(?![0-9])", s[:6])
+    if not m:
+        return None
+    return {"13": "1/3", "12": "1/2", "25": "2/5"}[m.group(1)]
+
 
 # ---------------------------------------------------------------- detection
 def detect_format(xlsx_path: str | Path) -> Literal["planificado", "diario_hl", "unknown"]:
@@ -223,22 +262,82 @@ def _parse_diario_hl(xlsx_path: str | Path) -> pd.DataFrame:
 
 
 # ---------------------------------------------------------------- feasibility
-def _attach_feasibility(blocks: pd.DataFrame, feasibility_parquet: str | Path) -> pd.DataFrame:
+def _attach_feasibility(
+    blocks: pd.DataFrame,
+    feasibility_parquet: str | Path,
+    dim_sku_parquet: str | Path | None = None,
+) -> pd.DataFrame:
+    """Annotate every block with two feasibility judgements:
+
+    1. **`format_ok`** — HARD rule: the SKU's `estado_volumen` must be in
+       the line's `LINE_FORMAT_COMPAT` allow-list. This is Damm's official
+       physical capability constraint. Failing this = block REFUSED.
+    2. **`has_history`** — SOFT rule: at least `MIN_HISTORICAL_RUNS_FOR_FEASIBILITY`
+       past OFs on this (sku, línea) pair. Failing this means low confidence
+       (we still predict, but flag the prediction).
+
+    A block's overall `feasible` flag = `format_ok` only.
+    """
     feas = pd.read_parquet(feasibility_parquet)
-    feas = feas[feas["n_historical_runs"] >= MIN_HISTORICAL_RUNS_FOR_FEASIBILITY]
-    feas_keys = set(zip(feas["sku"].astype(str), feas["linea"].astype(int)))
-    sku_seen = set(feas["sku"].astype(str).unique())
+    n_hist = (
+        feas.groupby(["sku", "linea"])["n_historical_runs"].sum()
+        .rename("n_historical_runs").reset_index()
+    )
+    n_hist_map = {(str(r["sku"]), int(r["linea"])): int(r["n_historical_runs"])
+                  for _, r in n_hist.iterrows()}
+    sku_seen = set(str(s) for s in n_hist["sku"].unique())
 
-    def reason(sku: str, linea: int) -> tuple[bool, str | None]:
-        if (sku, int(linea)) in feas_keys:
-            return True, None
-        if sku not in sku_seen:
-            return False, f"SKU '{sku}' has no historical runs on any line"
-        return False, f"SKU '{sku}' has fewer than {MIN_HISTORICAL_RUNS_FOR_FEASIBILITY} historical runs on L{linea}"
+    # estado_volumen per SKU: prefer dim_sku, fall back to a parse of tipo_envase
+    sku_to_state: dict[str, str | None] = {}
+    if dim_sku_parquet is not None and Path(dim_sku_parquet).exists():
+        dim = pd.read_parquet(dim_sku_parquet)
+        if "estado_volumen" in dim.columns:
+            for _, r in dim.iterrows():
+                sku_to_state[str(r["sku"])] = (
+                    None if pd.isna(r["estado_volumen"]) else str(r["estado_volumen"])
+                )
 
-    flags = [reason(str(s), int(l)) for s, l in zip(blocks["sku"], blocks["linea"])]
-    blocks["feasible"] = [f[0] for f in flags]
-    blocks["feas_reason"] = [f[1] for f in flags]
+    def _state_for(sku: str) -> tuple[str | None, str]:
+        """Returns (estado_volumen, source) where source is 'dim_sku' | 'inferred' | 'unknown'."""
+        if sku in sku_to_state and sku_to_state[sku] is not None:
+            return sku_to_state[sku], "dim_sku"
+        inferred = infer_estado_volumen_from_sku(sku)
+        if inferred is not None:
+            return inferred, "inferred"
+        return None, "unknown"
+
+    def judge(sku: str, linea: int) -> tuple[bool, bool, str | None]:
+        sku = str(sku); linea = int(linea)
+        state, src = _state_for(sku)
+        allowed = sorted(LINE_FORMAT_COMPAT.get(linea, set()))
+        n_h = n_hist_map.get((sku, linea), 0)
+        has_history = n_h >= MIN_HISTORICAL_RUNS_FOR_FEASIBILITY
+
+        # Format check — HARD only when we KNOW the format and it doesn't fit.
+        # Unknown formats get benefit of the doubt (and a warning via has_history).
+        if state is not None and state not in LINE_FORMAT_COMPAT.get(linea, set()):
+            return False, has_history, (
+                f"Format incompatibility: SKU '{sku}' is {state} "
+                f"({'from dim_sku' if src == 'dim_sku' else 'inferred from SKU code'}); "
+                f"L{linea} only produces {allowed}."
+            )
+
+        if not has_history:
+            if sku not in sku_seen:
+                return True, False, (
+                    f"Low confidence: SKU '{sku}' has no historical runs on any line "
+                    f"(format {state or 'unknown'} assumed compatible with L{linea})."
+                )
+            return True, False, (
+                f"Low confidence: only {n_h} historical run(s) on L{linea} "
+                f"(threshold = {MIN_HISTORICAL_RUNS_FOR_FEASIBILITY})."
+            )
+        return True, True, None
+
+    flags = [judge(s, l) for s, l in zip(blocks["sku"], blocks["linea"])]
+    blocks["feasible"]    = [f[0] for f in flags]
+    blocks["has_history"] = [f[1] for f in flags]
+    blocks["feas_reason"] = [f[2] for f in flags]
     return blocks
 
 
@@ -246,6 +345,7 @@ def _attach_feasibility(blocks: pd.DataFrame, feasibility_parquet: str | Path) -
 def parse_planning_excel(
     xlsx_path: str | Path,
     feasibility_parquet: str | Path,
+    dim_sku_parquet: str | Path | None = None,
 ) -> tuple[pd.DataFrame, dict]:
     """Parse an uploaded Damm planning Excel and return (blocks, meta).
 
@@ -270,7 +370,15 @@ def parse_planning_excel(
     blocks["linea"] = blocks["linea"].astype(int)
     blocks = blocks.sort_values(["linea", "start_ts", "secuencia"], na_position="last").reset_index(drop=True)
 
-    blocks = _attach_feasibility(blocks, feasibility_parquet)
-    meta["n_blocks"] = int(len(blocks))
-    meta["n_infeasible"] = int((~blocks["feasible"]).sum())
+    # Default the SKU master to the lookups/dim_sku.parquet next to feasibility
+    if dim_sku_parquet is None:
+        candidate = Path(feasibility_parquet).parent / "dim_sku.parquet"
+        if candidate.exists():
+            dim_sku_parquet = candidate
+
+    blocks = _attach_feasibility(blocks, feasibility_parquet, dim_sku_parquet)
+    meta["n_blocks"]            = int(len(blocks))
+    meta["n_infeasible"]        = int((~blocks["feasible"]).sum())
+    meta["n_low_confidence"]    = int((blocks["feasible"] & ~blocks["has_history"]).sum())
+    meta["line_format_compat"]  = {k: sorted(v) for k, v in LINE_FORMAT_COMPAT.items()}
     return blocks, meta

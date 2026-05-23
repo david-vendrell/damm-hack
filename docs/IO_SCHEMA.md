@@ -330,6 +330,18 @@ WHERE linea = :linea AND fecha = :fecha;
 
 ---
 
+## Line-format compatibility (confirmed by Damm, 2026-05-23)
+
+| Line | Allowed formats | Notes |
+|---|---|---|
+| **L14** | `1/3` (33 cl), `1/2` (50 cl) | Operates mostly 1/3 — only 1 historical 1/2 run in 2025 |
+| **L17** | `1/3` (33 cl) only | Single-format line — any non-1/3 SKU is HARD-rejected |
+| **L19** | `1/3` (33 cl), `1/2` (50 cl), `2/5` (44 cl) | Most flexible line |
+
+Encoded as `LINE_FORMAT_COMPAT` in `engine/parse_planning_excel.py` and as `lookups/line_format_compat.parquet`. The platform refuses any (sku, línea) where the SKU's `estado_volumen` is positively known and not in the line's set. Unknown formats fall back to a SKU-code regex (`ED13... → 1/3`, `ED12... → 1/2`, etc.); if still unknown, the block is allowed through with a low-confidence flag.
+
+The optimizer (parallel ticket) **must** consult `LINE_FORMAT_COMPAT` before proposing any cross-line reassignment.
+
 ## Critical rules (encoded in DB at `_meta_formulas` and `_meta_relationships`)
 
 1. **MES / OF is the central key.** Every fact table joins to a single OF identifier.
