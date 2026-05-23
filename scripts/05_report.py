@@ -144,6 +144,15 @@ def build_html() -> str:
     A15 = load_csv("A15_runs_extremos_top_y_bottom_oee")
     A16 = load_csv("A16_distribucion_horas_por_of")
     A17 = load_csv("A17_oee_alta_vs_baja_horas_cip")
+    A18 = load_csv("A18_horas_cambio_real_vs_teorico")
+    A19 = load_csv("A19_diario_hl_plan_vs_acordado")
+    A20 = load_csv("A20_anatomia_par_tot_por_linea")
+
+    # Damm-model tables
+    con2 = duckdb.connect(str(DB_PATH), read_only=True)
+    formulas = con2.execute("SELECT * FROM _meta_formulas").fetchdf()
+    relationships = con2.execute("SELECT * FROM _meta_relationships").fetchdf()
+    con2.close()
 
     # Volume change impact for the headline
     volum_row = A10[A10["dimension"] == "volum"].iloc[0] if not A10.empty else None
@@ -206,15 +215,18 @@ def build_html() -> str:
     <h1 class="no-break">Contents</h1>
     <div class="toc"><ol>
         <li>Executive summary &amp; headline KPIs</li>
+        <li>Damm data model — formulas &amp; relationships</li>
         <li>Data inventory — raw &amp; canonical tables</li>
         <li>OEE baseline per line</li>
         <li>What changeovers cost — by type &amp; dimension</li>
-        <li>Theoretical vs actual changeover times (volume size changes)</li>
+        <li>Real vs theoretical changeover times (Damm formula)</li>
+        <li>Anatomy of PAR_TOT per line</li>
         <li>Lost-time decomposition</li>
         <li>Temporal patterns — day-of-week, month</li>
         <li>SKU portfolio — volume, performance, transitions</li>
         <li>Maintenance &amp; LIMPIEZA events</li>
-        <li>Plan vs Actual (May 2026)</li>
+        <li>Plan vs Actual (May 2026) — Blue Yonder window</li>
+        <li>Daily HL planning — Programa Prod. vs Acordado</li>
         <li>Run-length distribution &amp; CIP impact</li>
         <li>Extreme runs — best &amp; worst OEE</li>
         <li>Data quality notes</li>
@@ -244,14 +256,35 @@ def build_html() -> str:
     </ol>
     """)
 
-    # ---------- 2. Data inventory
-    html_parts.append("<h1>2. Data inventory</h1><h2>Raw tables (lossless ingestion)</h2>")
+    # ---------- 2. Damm data model
+    html_parts.append("""
+    <h1>2. Damm data model — formulas &amp; relationships</h1>
+    <p>Encoded verbatim from the data-model diagram provided by Damm. These are also stored as queryable tables (<code>_meta_formulas</code>, <code>_meta_relationships</code>) inside the DuckDB database.</p>
+    <h2>Formulas</h2>
+    """)
+    html_parts.append(df_table(formulas))
+    html_parts.append("""
+    <div class="callout">
+      <div class="label">Critical correction</div>
+      <p>Earlier we used <code>horas_cip</code> as the proxy for changeover duration per OF. The correct Damm formula is:</p>
+      <p style="font-family:'SF Mono',Menlo,monospace; font-size:11pt; text-align:center; margin:3mm 0;">
+        <strong>Tiempo cambio = PAR_TOT &minus; (PNP + LIMPIEZA + IDLE)</strong>
+      </p>
+      <p>This is now exposed as <code>fact_runs.horas_cambio</code>. <strong>IDLE does NOT affect OEE</strong> — keep it informational, exclude from impact arithmetic.</p>
+    </div>
+    <h2>Entity relationships</h2>
+    <p>The central nexus is <strong>MES / OF (Material × Production Order)</strong>. Every analytical table joins to it.</p>
+    """)
+    html_parts.append(df_table(relationships, max_rows=25))
+
+    # ---------- 3. Data inventory
+    html_parts.append("<h1>3. Data inventory</h1><h2>Raw tables (lossless ingestion)</h2>")
     html_parts.append(df_table(raw_tables[["table_name", "source_file", "rows", "n_cols", "description"]], max_rows=20))
     html_parts.append("<h2>Canonical / derived tables</h2>")
     html_parts.append(df_table(derived_tables[["table_name", "rows", "description"]], max_rows=20))
 
-    # ---------- 3. OEE baseline
-    html_parts.append("<h1>3. OEE baseline per line</h1>")
+    # ---------- 4. OEE baseline
+    html_parts.append("<h1>4. OEE baseline per line</h1>")
     html_parts.append("<p>Aggregated over all production OFs in 2025, excluding LIMPIEZA WOs and outlier rows where <code>H. Tot. &gt; 100h</code>.</p>")
     html_parts.append(df_table(A01))
     html_parts.append("""
@@ -261,8 +294,8 @@ def build_html() -> str:
     </div>
     """)
 
-    # ---------- 4. Changeover impact
-    html_parts.append("<h1>4. What changeovers cost — by type &amp; dimension</h1>")
+    # ---------- 5. Changeover impact
+    html_parts.append("<h1>5. What changeovers cost — by type &amp; dimension</h1>")
     html_parts.append("<h2>By <code>C. PRINCIPAL</code> (the type label)</h2>")
     html_parts.append(df_table(A02))
     html_parts.append("<h2>By line × type</h2>")
@@ -276,19 +309,33 @@ def build_html() -> str:
     </div>
     """)
 
-    # ---------- 5. Theoretical vs actual changeovers
-    html_parts.append("<h1>5. Theoretical vs actual changeover times</h1>")
-    html_parts.append("<p>For each consecutive (prev, curr) production pair sharing a volume state mapped to the changeover matrix, we compare the <strong>actual mean CIP time</strong> against the <strong>theoretical reference</strong> in <code>dim_theoretical_changeover_matrix</code>. <em>delta_min &gt; 0</em> = slower than theoretical.</p>")
-    html_parts.append(df_table(A04, max_rows=30))
+    # ---------- 6. Real vs theoretical changeover times (Damm formula)
+    html_parts.append("<h1>6. Real vs theoretical changeover times (Damm formula)</h1>")
+    html_parts.append("<p>Using the corrected formula <code>horas_cambio = PAR_TOT &minus; (PNP + LIMPIEZA + IDLE)</code> per OF, compared against the theoretical reference in <code>dim_theoretical_changeover_matrix</code>. We also retain the earlier CIP-only view for transparency.</p>")
+    html_parts.append("<h3>A18 — Damm-formula version (per OF, in-OF time only)</h3>")
+    html_parts.append(df_table(A18))
+    html_parts.append("<h3>A04 — CIP-only proxy (legacy view)</h3>")
+    html_parts.append(df_table(A04, max_rows=15))
     html_parts.append("""
     <div class="callout">
-      <div class="label">Caveat</div>
-      <p>CIP time only captures the cleaning portion of the changeover. The full changeover may also include time spent between OFs (in a separate LIMPIEZA WO — see §9) and warm-up at the start of the next OF. Treat these as a directional indicator, not a final number.</p>
+      <div class="label">Important nuance</div>
+      <p>The Damm-formula <em>horas_cambio</em> captures only the in-OF portion of a changeover. The full changeover budget = in-OF <code>horas_cambio</code> + duration of any standalone LIMPIEZA WO(s) that occurred between the previous and current production OF (see §11). The L19 1/3 ↔ 1/2 size change averages 6 h theoretical but only ~21 min of in-OF changeover time — the bulk happens as separate LIMPIEZA WOs.</p>
     </div>
     """)
 
-    # ---------- 6. Lost-time decomposition
-    html_parts.append("<h1>6. Lost-time decomposition</h1>")
+    # ---------- 7. Anatomy of PAR_TOT
+    html_parts.append("<h1>7. Anatomy of PAR_TOT per line</h1>")
+    html_parts.append("<p>Where does the total stoppage time per OF actually go? Average minutes per OF, decomposed.</p>")
+    html_parts.append(df_table(A20))
+    html_parts.append("""
+    <div class="callout">
+      <div class="label">L14 is dominated by PNP</div>
+      <p>L14 has an average <strong>319 min</strong> of PNP (Planned Non-Production) per OF — vs ~131 min on L17 and L19. PNP is shorter shifts / scheduled downtime, not lost productivity. This explains a big chunk of L14&apos;s low OEE: less wall-clock running time per OF.</p>
+    </div>
+    """)
+
+    # ---------- 8. Lost-time decomposition
+    html_parts.append("<h1>8. Lost-time decomposition</h1>")
     html_parts.append("<p>From <code>fact_lost_time</code>. <em>marcha</em> (productive) excluded.</p>")
     html_parts.append(df_table(A05, max_rows=30))
     html_parts.append("""
@@ -298,15 +345,15 @@ def build_html() -> str:
     </div>
     """)
 
-    # ---------- 7. Temporal patterns
-    html_parts.append("<h1>7. Temporal patterns</h1>")
+    # ---------- 9. Temporal patterns
+    html_parts.append("<h1>9. Temporal patterns</h1>")
     html_parts.append("<h2>OEE by day of week (1=Mon, 7=Sun)</h2>")
     html_parts.append(df_table(A06, max_rows=25))
     html_parts.append("<h2>OEE by month</h2>")
     html_parts.append(df_table(A07, max_rows=40))
 
-    # ---------- 8. SKU portfolio
-    html_parts.append("<h1>8. SKU portfolio</h1>")
+    # ---------- 10. SKU portfolio
+    html_parts.append("<h1>10. SKU portfolio</h1>")
     html_parts.append("<h2>Top 20 SKUs by produced volume</h2>")
     html_parts.append(df_table(A08, max_rows=20))
     html_parts.append("<h2>Worst-performing SKUs (≥ 10 runs in 2025)</h2>")
@@ -314,32 +361,43 @@ def build_html() -> str:
     html_parts.append("<h2>Most-frequent SKU pair transitions</h2>")
     html_parts.append(df_table(A11, max_rows=20))
 
-    # ---------- 9. Maintenance & limpieza
-    html_parts.append("<h1>9. Maintenance &amp; LIMPIEZA events</h1>")
+    # ---------- 11. Maintenance & limpieza
+    html_parts.append("<h1>11. Maintenance &amp; LIMPIEZA events</h1>")
     html_parts.append("<h2>OEE by number of maintenance calls during the OF</h2>")
     html_parts.append(df_table(A12, max_rows=15))
     html_parts.append("<h2>Standalone LIMPIEZA WOs per line</h2>")
     html_parts.append(df_table(A13))
 
-    # ---------- 10. Plan vs actual
-    html_parts.append("<h1>10. Plan vs Actual — May 2026 sample</h1>")
+    # ---------- 12. Plan vs actual May 2026
+    html_parts.append("<h1>12. Plan vs Actual — May 2026 sample</h1>")
     html_parts.append("<p>The provided plan covers May 18–24 2026. Actual production data covers May 18–22 2026. Below: best-effort alignment on (linea, sku, date).</p>")
     html_parts.append(df_table(A14, max_rows=25))
 
-    # ---------- 11. Run length
-    html_parts.append("<h1>11. Run-length distribution &amp; CIP impact</h1>")
+    # ---------- 13. Daily HL planning
+    html_parts.append("<h1>13. Daily HL planning — Programa Prod. vs Acordado</h1>")
+    html_parts.append("<p>From the <code>Diario Hl_Planif.xlsx</code> daily replanning report (May 18–24 2026). <em>delta_hl</em> = Acordado − Programa Prod. Positive = added volume, negative = removed. Together with the format/quantity-modification counters, this is the <strong>real-world ground truth</strong> of how much a plan has to flex during the week.</p>")
+    html_parts.append(df_table(A19, max_rows=25))
+    html_parts.append("""
+    <div class="callout">
+      <div class="label">Demo gold</div>
+      <p>L19 had &plus;384 HL added on May 20 and &minus;186 HL removed on May 21 — with <strong>6 changes</strong> on that single day (3 format mods, 3 quantity mods, 1 inclusion, 2 exclusions). Use this week as the live scenario in the demo: replay the plan, inject those real interventions, watch LineWise rebalance.</p>
+    </div>
+    """)
+
+    # ---------- 14. Run length
+    html_parts.append("<h1>14. Run-length distribution &amp; CIP impact</h1>")
     html_parts.append("<h2>Hours per OF — distribution by line</h2>")
     html_parts.append(df_table(A16))
     html_parts.append("<h2>OEE bucketed by CIP duration</h2>")
     html_parts.append(df_table(A17, max_rows=20))
 
-    # ---------- 12. Extremes
-    html_parts.append("<h1>12. Best &amp; worst runs by OEE</h1>")
+    # ---------- 15. Extremes
+    html_parts.append("<h1>15. Best &amp; worst runs by OEE</h1>")
     html_parts.append(df_table(A15, max_rows=22))
 
     # ---------- 13. Data quality
     html_parts.append("""
-    <h1>13. Data quality notes</h1>
+    <h1>16. Data quality notes</h1>
     <table>
       <tr><th>#</th><th>Issue</th><th>Mitigation</th></tr>
       <tr><td>1</td><td><code>OEE &gt; 1</code> on ~12 rows (e.g. 1.57 on a FREE DAMM run on L17). Likely a unit / aggregation glitch.</td><td>Clip to <code>[0, 1]</code> in modelling. Flag when &gt; 1.</td></tr>
@@ -355,7 +413,7 @@ def build_html() -> str:
 
     # ---------- 14. Implications
     html_parts.append("""
-    <h1>14. Implications for the LineWise build</h1>
+    <h1>17. Implications for the LineWise build</h1>
     <ul>
       <li><strong>Sequencer objective:</strong> minimise the number of <em>size</em> changes first, then <em>brand/producto/cap</em> changes. Use the empirical OEE deltas as weights (volum: −10.7, producto: −5.8, brand: −5.7, cap: −5.5, primario: −3.9, secundario: −3.4, palet: −2.6).</li>
       <li><strong>OEE estimator features</strong> (already in <code>fact_runs</code> ready to use): <code>linea</code>, <code>sku</code>, <code>prev_sku</code>, <code>cambio_tipo_principal</code>, <code>estado_volumen</code>, <code>prev_estado_volumen</code>, <code>dia_semana</code>, <code>mes</code>, <code>n_llamadas_mant</code>, <code>horas_cip</code>, plus the 8 <code>c_*_flag</code> booleans.</li>

@@ -9,19 +9,21 @@
 
 ```
 damm-hack/
-├── Repte operacions/            ← raw Damm Excels (untouched)
+├── Repte operacions/            ← raw Damm Excels (untouched, includes Diario Hl + v2 Planificado)
+├── docs/
+│   └── IO_SCHEMA.md             ← Input / Output contract for engine, UI, Claude tools (source of truth)
 ├── scripts/                     ← repeatable pipeline (Python)
-│   ├── 01_ingest.py             ← Excels → DuckDB raw_* tables (lossless)
+│   ├── 01_ingest.py             ← Excels → DuckDB raw_* tables (lossless, 12 tables now)
 │   ├── 02_parse_cf_matrix.py    ← Tabla CF Prat → dim_theoretical_changeover_matrix
-│   ├── 03_derived_tables.py     ← raw_* → fact_runs / fact_changeovers / fact_lost_time / fact_limpieza / fact_plan_vs_actual_2026 / dim_sku / dim_line
-│   ├── 04_analytics.py          ← 17 analytical queries → CSVs + Parquet exports
+│   ├── 03_derived_tables.py     ← raw_* → fact_runs (with horas_cambio) / fact_changeovers / fact_lost_time / fact_limpieza / fact_plan_vs_actual_2026 / fact_diario_hl_planif / dim_sku / dim_line + _meta_formulas + _meta_relationships
+│   ├── 04_analytics.py          ← 20 analytical queries → CSVs + Parquet exports
 │   └── 05_report.py             ← Generate Data Analysis Report (HTML + PDF)
 ├── db/
-│   └── linewise.duckdb          ← single-file portable database (~5 MB)
+│   └── linewise.duckdb          ← single-file portable database (~6 MB)
 ├── parquet/                     ← fact/dim tables for non-DuckDB users
 ├── reports/
-│   ├── analytics/               ← per-query CSV results (17 files)
-│   └── LineWise_Data_Report.pdf ← polished data report
+│   ├── analytics/               ← per-query CSV results (20 files)
+│   └── LineWise_Data_Report.pdf ← polished data report (17 sections)
 └── LineWise Operaciones ES.pdf  ← original challenge brief
 ```
 
@@ -56,8 +58,11 @@ All scripts are idempotent — re-run any of them after changes to upstream raw 
 | `raw_mantenimiento` | Mantenimiento 14_17_19_ 2025.xlsx | 2,276 | 25 |
 | `raw_volumen` | Volumen 14_17_19_ 2025.xlsx | 2,278 | 20 |
 | `raw_plan_2026` | Planificado producciones 14-17-19.xlsx | 78 | 19 |
+| `raw_plan_2026_v2` | Planificado producciones (v2) | 78 | 18 |
 | `raw_actual_2026` | Produccion_L14,17,19_18-22.xlsx | 36 | 20 |
 | `raw_data_extra` | data - 2026-05-18T181640.542.xlsx | 2,276 | 45 |
+| `raw_diario_hl_planif` | Diario Hl_Planif.xlsx (wide cells) | 44 | 100 |
+| `raw_diario_hl_planif_headers` | sidecar — original multi-line headers | 98 | 3 |
 | `raw_cf_lata_barril` | Tabla CF Prat (sheet) | 46 | 8 |
 | `raw_cf_tiempos_adicionales` | Tabla CF Prat (sheet) | 37 | 12 |
 
@@ -68,18 +73,31 @@ All scripts are idempotent — re-run any of them after changes to upstream raw 
 | `dim_line` | 3 | Production lines L14/L17/L19 + format states they support |
 | `dim_sku` | 170 | SKU master: brand, family, beer, can type, packaging, **inferred `estado_volumen`** (1/3, 1/2, 2/5) |
 | `dim_theoretical_changeover_matrix` | 86 | Long-format theoretical changeover minutes per (linea, from_state, to_state) parsed from Tabla CF Prat |
-| `fact_runs` | 2,184 | **Canonical per-OF run.** Joined OEE + Tiempo (lost-time decomposition) + Volumen + Mantenimiento + Cambios. 51 columns. Excludes LIMPIEZA WOs. |
+| `fact_runs` | 2,184 | **Canonical per-OF run.** Joined OEE + Tiempo + Volumen + Mantenimiento + Cambios. **52 columns** including `horas_cambio` (the Damm-formula real changeover time). Excludes LIMPIEZA WOs. |
 | `fact_lost_time` | 19,602 | Long-format breakdown of every OF's time in 9 categories: `marcha, cip, baja_velocidad, saturacion_salida, falta_producto, esterilizacion, paro_maquina, idle, pnp` (in minutes) |
 | `fact_changeovers` | 2,180 | Per consecutive (prev_of, of) on the same line, with prev SKU/state, change type label, and theoretical reference duration |
 | `fact_limpieza` | 133 | Standalone LIMPIEZA / cleaning WOs (separated from production runs) |
 | `fact_plan_vs_actual_2026` | 91 | May 2026 Blue Yonder plan joined to actual production for plan-vs-actual comparison |
+| `fact_diario_hl_planif` | 197 | **Daily HL planning** May 18-24 2026 in long format `(linea, sku, fecha, metric, value)` — Programa Prod / Acordado + 9 churn metrics |
+| `_meta_formulas` | 6 | The OEE & changeover formulas from Damm's data-model diagram |
+| `_meta_relationships` | 20 | The edges from Damm's data-model diagram |
 
 ### Metadata helpers
 
 ```sql
-SELECT * FROM _meta_files;     -- which source file populated which raw_ table
-SELECT * FROM _meta_tables;    -- description of every derived table
+SELECT * FROM _meta_files;          -- which source file populated which raw_ table
+SELECT * FROM _meta_tables;         -- description of every derived table
+SELECT * FROM _meta_formulas;       -- Damm OEE & changeover formulas (from the diagram)
+SELECT * FROM _meta_relationships;  -- Damm entity-relationship edges (from the diagram)
 ```
+
+### Damm's data model & the corrected changeover formula
+
+From the diagram Damm provided, **MES / OF is the central nexus**. Every fact table joins to a single OF identifier. The diagram also gives us the **real changeover formula**:
+
+> `horas_cambio = PAR_TOT − (PNP + LIMPIEZA + IDLE)`
+
+This is now exposed as `fact_runs.horas_cambio` (previously we approximated with `horas_cip` — wrong). Note: `IDLE` does **NOT** affect OEE — keep it informational. See `docs/IO_SCHEMA.md` for the full data-model diagram and Input/Output contract.
 
 ---
 

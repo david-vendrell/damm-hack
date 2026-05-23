@@ -191,6 +191,55 @@ def load_data_extra() -> pd.DataFrame:
     return df
 
 
+def load_plan_2026_v2() -> pd.DataFrame:
+    """Refreshed Planificado file (missing 'Denominación' but same shape)."""
+    df = pd.read_excel(RAW / "Planificado - producciones 14 - 17 - 19 (v2).xlsx", sheet_name="Sheet1")
+    df = normalise_columns(df)
+    df["fecha_ini"] = pd.to_datetime(df["fecha_ini"], errors="coerce")
+    df["fecha_fin"] = pd.to_datetime(df["fecha_fin"], errors="coerce")
+    def combine(row):
+        if pd.isna(row["fecha_ini"]):
+            return pd.NaT
+        h = row.get("hora_ini")
+        if pd.isna(h):
+            return row["fecha_ini"]
+        try:
+            if hasattr(h, "hour"):
+                return row["fecha_ini"].replace(
+                    hour=int(h.hour), minute=int(h.minute), second=int(h.second)
+                )
+            return pd.to_datetime(f"{row['fecha_ini'].date()} {h}", errors="coerce")
+        except Exception:
+            return row["fecha_ini"]
+    df["start_ts"] = df.apply(combine, axis=1)
+    df = coerce_numeric(df, [
+        "centro", "tren", "cntd_jda", "cntd_plan", "pndt_env",
+        "secuencia", "entrada_en_tabla",
+    ])
+    df["source_file"] = "Planificado - producciones 14 - 17 - 19 (v2).xlsx"
+    return df
+
+
+def load_diario_hl_planif_raw() -> pd.DataFrame:
+    """Load the wide cross-tab as-is, preserving every cell."""
+    df = pd.read_excel(RAW / "Diario Hl_Planif.xlsx", sheet_name="Diario Hl")
+    # Preserve the original (possibly multi-line) column names in a sidecar
+    df = df.where(pd.notna(df), None)
+    # Normalize column names to col_0, col_1, ... for safe SQL identifiers,
+    # but keep the original headers in a separate metadata row table
+    original_columns = list(df.columns)
+    df.columns = [f"col_{i}" for i in range(df.shape[1])]
+    df.insert(0, "row_idx", range(len(df)))
+    df["source_file"] = "Diario Hl_Planif.xlsx"
+    # Stash original headers
+    global _DIARIO_HL_HEADERS
+    _DIARIO_HL_HEADERS = original_columns
+    return df
+
+
+_DIARIO_HL_HEADERS: list[str] = []
+
+
 def load_cf_matrix_raw() -> tuple[pd.DataFrame, pd.DataFrame]:
     """Load both sheets of the changeover-format matrix as raw cell tables."""
     xl = pd.ExcelFile(RAW / "Tabla CF Prat 2026_14_17_19.xlsx")
@@ -219,8 +268,10 @@ def main() -> None:
         "raw_mantenimiento": load_mantenimiento,
         "raw_volumen": load_volumen,
         "raw_plan_2026": load_plan_2026,
+        "raw_plan_2026_v2": load_plan_2026_v2,
         "raw_actual_2026": load_actual_2026,
         "raw_data_extra": load_data_extra,
+        "raw_diario_hl_planif": load_diario_hl_planif_raw,
     }
 
     for table, fn in loaders.items():
@@ -241,6 +292,17 @@ def main() -> None:
     con.execute("CREATE OR REPLACE TABLE raw_cf_lata_barril AS SELECT * FROM _lb")
     con.unregister("_a"); con.unregister("_lb")
 
+    # Diario Hl header sidecar — preserves the original multi-line Excel headers
+    if _DIARIO_HL_HEADERS:
+        headers_df = pd.DataFrame({
+            "col_idx": range(len(_DIARIO_HL_HEADERS)),
+            "col_name": [f"col_{i}" for i in range(len(_DIARIO_HL_HEADERS))],
+            "original_header": [str(h) for h in _DIARIO_HL_HEADERS],
+        })
+        con.register("_hd", headers_df)
+        con.execute("CREATE OR REPLACE TABLE raw_diario_hl_planif_headers AS SELECT * FROM _hd")
+        con.unregister("_hd")
+
     con.execute("""
         CREATE OR REPLACE TABLE _meta_files AS
         SELECT * FROM (VALUES
@@ -253,7 +315,10 @@ def main() -> None:
             ('Produccion_L14,17,19_18-22.xlsx',               'raw_actual_2026',          'Actual production for May 18-22, 2026 (same window as plan).'),
             ('data - 2026-05-18T181640.542.xlsx',             'raw_data_extra',           'Additional OEE history (Sep-Oct 2025 onwards).'),
             ('Tabla CF Prat 2026_14_17_19.xlsx',              'raw_cf_lata_barril',       'Theoretical changeover matrix LATA/BARRIL per line (raw cells).'),
-            ('Tabla CF Prat 2026_14_17_19.xlsx',              'raw_cf_tiempos_adicionales','Additional cleaning/maintenance time references (raw cells).')
+            ('Tabla CF Prat 2026_14_17_19.xlsx',              'raw_cf_tiempos_adicionales','Additional cleaning/maintenance time references (raw cells).'),
+            ('Planificado - producciones 14 - 17 - 19 (v2).xlsx','raw_plan_2026_v2',       'Refreshed Planificado for May 2026 (same shape, missing Denominacion).'),
+            ('Diario Hl_Planif.xlsx',                         'raw_diario_hl_planif',     'Daily HL planning report May 18-24 2026 (raw wide cross-tab cells).'),
+            ('Diario Hl_Planif.xlsx',                         'raw_diario_hl_planif_headers','Sidecar with original multi-line Excel headers for the Diario Hl table.')
         ) AS t(source_file, table_name, description)
     """)
 

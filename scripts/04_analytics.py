@@ -340,12 +340,91 @@ def main() -> None:
         ORDER BY linea, cip_bucket
     """, n_print=20)
 
+    # ----------------------------------------------------------------- A18
+    # Real changeover time per OF (Damm formula: PAR_TOT - PNP - LIMPIEZA - IDLE)
+    # vs theoretical reference. Compare also against CIP (the prev proxy).
+    run(con, "A18_horas_cambio_real_vs_teorico", """
+        SELECT
+            ch.linea,
+            ch.prev_estado_volumen                       AS from_estado,
+            ch.estado_volumen                            AS to_estado,
+            COUNT(*)                                  AS n,
+            ROUND(AVG(r.horas_cambio) * 60, 1)        AS cambio_real_min_medio,
+            ROUND(MEDIAN(r.horas_cambio) * 60, 1)     AS cambio_real_min_mediano,
+            ROUND(AVG(r.horas_cip) * 60, 1)           AS cip_min_medio,
+            ch.teorico_cambio_volumen_min             AS teorico_min,
+            ROUND(AVG(r.horas_cambio) * 60 - ch.teorico_cambio_volumen_min, 1) AS delta_real_vs_teorico,
+            ROUND(AVG(ch.oee), 4)                     AS oee_medio
+        FROM fact_changeovers ch
+        LEFT JOIN fact_runs r ON r.of = ch.of
+        WHERE ch.prev_estado_volumen IS NOT NULL
+          AND ch.estado_volumen      IS NOT NULL
+          AND ch.prev_estado_volumen <> ch.estado_volumen
+          AND r.horas_cambio         IS NOT NULL
+        GROUP BY ch.linea, ch.prev_estado_volumen, ch.estado_volumen, ch.teorico_cambio_volumen_min
+        HAVING COUNT(*) >= 3
+        ORDER BY delta_real_vs_teorico DESC NULLS LAST
+        LIMIT 30
+    """, n_print=15)
+
+    # ----------------------------------------------------------------- A19
+    # Plan vs Acordado deviation per (linea, fecha) and total churn metrics
+    # from Diario Hl. Tells us "how much did the plan change during the week?"
+    run(con, "A19_diario_hl_plan_vs_acordado", """
+        WITH wide AS (
+            SELECT
+                linea, fecha, sku,
+                SUM(value) FILTER (WHERE metric = 'programa_prod_hl')        AS prog_prod_hl,
+                SUM(value) FILTER (WHERE metric = 'programa_acordado_hl')    AS prog_acord_hl,
+                SUM(value) FILTER (WHERE metric = 'n_total_cambios')         AS n_cambios,
+                SUM(value) FILTER (WHERE metric = 'total_modif_formato')     AS modif_formato,
+                SUM(value) FILTER (WHERE metric = 'total_modif_cantidad')    AS modif_cantidad,
+                SUM(value) FILTER (WHERE metric = 'inclusion_formatos')      AS inclusiones,
+                SUM(value) FILTER (WHERE metric = 'exclusion_formato')       AS exclusiones
+            FROM fact_diario_hl_planif
+            GROUP BY linea, fecha, sku
+        )
+        SELECT
+            linea, fecha,
+            COUNT(DISTINCT sku)                                  AS n_skus,
+            ROUND(SUM(prog_prod_hl), 1)                          AS prog_prod_hl,
+            ROUND(SUM(prog_acord_hl), 1)                         AS prog_acord_hl,
+            ROUND(SUM(prog_acord_hl) - SUM(prog_prod_hl), 1)     AS delta_hl,
+            ROUND(SUM(n_cambios), 0)                             AS total_cambios,
+            ROUND(SUM(modif_formato), 0)                         AS total_modif_formato,
+            ROUND(SUM(modif_cantidad), 0)                        AS total_modif_cantidad,
+            ROUND(SUM(inclusiones), 0)                           AS total_inclusiones,
+            ROUND(SUM(exclusiones), 0)                           AS total_exclusiones
+        FROM wide
+        GROUP BY linea, fecha
+        ORDER BY linea, fecha
+    """, n_print=25)
+
+    # ----------------------------------------------------------------- A20
+    # Breakdown of where PAR_TOT goes (cleaner version of the changeover story)
+    run(con, "A20_anatomia_par_tot_por_linea", """
+        SELECT
+            linea,
+            COUNT(*)                                  AS n_ofs,
+            ROUND(AVG(horas_paro) * 60, 1)            AS par_tot_min_avg,
+            ROUND(AVG(horas_pnp) * 60, 1)             AS pnp_min_avg,
+            ROUND(AVG(horas_limpieza_dentro_of) * 60, 1) AS limpieza_in_of_min_avg,
+            ROUND(AVG(horas_idle) * 60, 1)            AS idle_min_avg,
+            ROUND(AVG(horas_cambio) * 60, 1)          AS cambio_real_min_avg,
+            ROUND(AVG(horas_cip) * 60, 1)             AS cip_min_avg
+        FROM fact_runs
+        WHERE NOT outlier AND horas_paro IS NOT NULL
+        GROUP BY linea
+        ORDER BY linea
+    """)
+
     # --------------------------------------------- EXPORT TO PARQUET
     print("\n=== Exporting fact / dim tables to Parquet")
     parquet_tables = [
         "dim_line", "dim_sku", "dim_theoretical_changeover_matrix",
         "fact_runs", "fact_lost_time", "fact_changeovers",
         "fact_limpieza", "fact_plan_vs_actual_2026",
+        "fact_diario_hl_planif",
     ]
     for t in parquet_tables:
         out = PARQUET_DIR / f"{t}.parquet"

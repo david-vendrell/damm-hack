@@ -16,12 +16,89 @@ Run from repo root after 01_ingest.py and 02_parse_cf_matrix.py:
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 import duckdb
+import pandas as pd
 
 ROOT = Path(__file__).resolve().parent.parent
 DB_PATH = ROOT / "db" / "linewise.duckdb"
+
+
+# --------------- Diario Hl long-format parser ------------------------
+# The Excel sheet 'Diario Hl' is a hierarchical wide cross-tab. We reshape
+# it to long format: (centro, linea, sku, fecha, metric, value).
+DIARIO_METRICS_ORDER = [
+    "programa_prod_hl",
+    "programa_acordado_hl",
+    "inclusion_formatos",
+    "exclusion_formato",
+    "total_modif_formato",
+    "aumento_cantidad",
+    "disminucion_cantidad",
+    "total_modif_cantidad",
+    "n_total_cambios",
+    "articulos_programa_prod",
+    "articulos_programa_acord",
+]
+# 7 days × (11 metrics + 1 separator) = 84 cols; then TOTAL block = 11 metrics.
+DIARIO_DAYS = [
+    "2026-05-18", "2026-05-19", "2026-05-20", "2026-05-21",
+    "2026-05-22", "2026-05-23", "2026-05-24",
+]
+
+
+def parse_diario_hl(con: duckdb.DuckDBPyConnection) -> pd.DataFrame:
+    raw = con.execute(
+        "SELECT * EXCLUDE (source_file) FROM raw_diario_hl_planif ORDER BY row_idx"
+    ).fetchdf()
+    records: list[dict] = []
+    current_centro = None
+    current_linea = None
+    for _, row in raw.iterrows():
+        label = row["col_0"]
+        if label is None:
+            continue
+        label = str(label).strip()
+        # Centro line:  "-  Centro : 0099 Factoría El Prat"
+        m = re.search(r"Centro\s*:\s*(\S+)", label)
+        if m:
+            current_centro = m.group(1)
+            continue
+        # Tren line:  "-  Tren : Tren 14 - LT"
+        m = re.search(r"Tren\s*:\s*Tren\s*(\d+)", label)
+        if m:
+            current_linea = int(m.group(1))
+            continue
+        # Skip totals and headers
+        if label.startswith("Total") or label.startswith("-") or label == "":
+            continue
+        # Else: it's a SKU row
+        sku = label
+        # Walk the 7 day-groups
+        for day_idx, fecha in enumerate(DIARIO_DAYS):
+            base = 1 + day_idx * 12  # col_1, col_13, col_25, ...
+            for m_idx, metric in enumerate(DIARIO_METRICS_ORDER):
+                col = f"col_{base + m_idx}"
+                if col not in raw.columns:
+                    continue
+                val = row[col]
+                if val is None or (isinstance(val, float) and pd.isna(val)):
+                    continue
+                try:
+                    val = float(val)
+                except (TypeError, ValueError):
+                    continue
+                records.append({
+                    "centro": current_centro,
+                    "linea": current_linea,
+                    "sku": sku,
+                    "fecha": fecha,
+                    "metric": metric,
+                    "value": val,
+                })
+    return pd.DataFrame(records)
 
 
 def main() -> None:
@@ -103,6 +180,15 @@ def main() -> None:
             t.idle                                            AS horas_idle,
             t.limpieza                                        AS horas_limpieza_dentro_of,
             t.pnp                                             AS horas_pnp,
+            -- Per Damm data-model image:
+            -- Tiempo cambio = PAR_TOT - (PNP + LIMPIEZA + IDLE)
+            GREATEST(
+                COALESCE(t.par_tot, 0)
+              - COALESCE(t.pnp, 0)
+              - COALESCE(t.limpieza, 0)
+              - COALESCE(t.idle, 0),
+                0
+            )                                                 AS horas_cambio,
             t.outlier_h_tot                                   AS outlier,
             m.no_llamadas                                     AS n_llamadas_mant,
             m.tiempo_en_espera                                AS horas_espera_mant,
@@ -277,6 +363,78 @@ def main() -> None:
                                                             AND p.fecha_fin_plan + INTERVAL 1 DAY
     """)
 
+    # ----------------------------------------------- fact_diario_hl_planif
+    print("==> Parsing Diario Hl_Planif into long format ...")
+    diario_long = parse_diario_hl(con)
+    print(f"    {len(diario_long)} (linea, sku, fecha, metric) rows")
+    con.register("_diario", diario_long)
+    con.execute("""
+        CREATE OR REPLACE TABLE fact_diario_hl_planif AS
+        SELECT centro,
+               CAST(linea AS INTEGER) AS linea,
+               sku,
+               CAST(fecha AS DATE)    AS fecha,
+               metric,
+               value
+        FROM _diario
+        WHERE linea IS NOT NULL
+    """)
+    con.unregister("_diario")
+
+    # ---------------------------------------------- _meta_formulas (Damm)
+    # Encoded verbatim from the diagram the team received.
+    con.execute("""
+        CREATE OR REPLACE TABLE _meta_formulas AS
+        SELECT * FROM (VALUES
+            ('OEE',
+             'OEE = Disponibilidad * Rendimiento * Calidad',
+             'Multiplicative. Available in raw_oee/fact_runs as oee, disponibilidad, rendimiento, ineficiencia.'),
+            ('Disponibilidad',
+             'Disponibilidad = Tiempo_de_funcionamiento / Tiempo_planificado',
+             'Already provided per OF in raw_oee.disponibilidad.'),
+            ('Rendimiento',
+             'Rendimiento = (Tiempo_ciclo_ideal * Produccion_total) / Tiempo_de_funcionamiento',
+             'Already provided per OF in raw_oee.rendimiento.'),
+            ('Calidad',
+             'Calidad = Produccion_buena / Produccion_total',
+             'Implicit in OEE; equals 1.0 when no rework. Inef = 1 - calidad equivalent.'),
+            ('Tiempo cambio (real)',
+             'Tiempo_cambio = PAR_TOT - (PNP + LIMPIEZA + IDLE)',
+             'fact_runs.horas_cambio. Use this (not horas_cip) for real changeover duration per OF.'),
+            ('IDLE',
+             'IDLE no afecta OEE',
+             'Exclude IDLE from OEE-impact arithmetic. fact_runs.horas_idle is informational only.')
+        ) AS t(concept, formula, notes)
+    """)
+
+    # ------------------------------------------- _meta_relationships (Damm)
+    # The diagram's entity relationships, encoded as edges.
+    con.execute("""
+        CREATE OR REPLACE TABLE _meta_relationships AS
+        SELECT * FROM (VALUES
+            ('MES_OF',               'CAMBIOS',                  'central nexus -> changeover events per OF',                           'blue dashed'),
+            ('MES_OF',               'OEE',                      'central nexus -> OEE master',                                         'blue dashed'),
+            ('MES_OF',               'TIEMPO',                   'central nexus -> lost-time breakdown',                                'blue dashed'),
+            ('MES_OF',               'VOLUMEN',                  'central nexus -> produced volumes',                                   'blue dashed'),
+            ('MES_OF',               'TIEMPO_CAMBIO_TEORICO',    'central nexus <-> theoretical changeover reference',                  'red bidirectional (CRITICAL)'),
+            ('CAMBIO_FORMATO',       'TIEMPO_CAMBIO_TEORICO',    'format change matrix feeds theoretical changeover times',             'red dashed (CRITICAL)'),
+            ('MANTENIMIENTO_LIMPIEZAS','TIEMPO_CAMBIO_TEORICO',  'cleaning/maintenance events feed theoretical changeover times',       'red dashed (CRITICAL)'),
+            ('CAMBIOS',              'TIPO_DE_CAMBIO',           'each changeover event has a type (Contenido, Pack, Palet, ...)',      'green'),
+            ('TIPO_DE_CAMBIO',       'PREVIOUS_OF',              'WARNING: tipo de cambio requires inspecting the previous OF',         'green (CRITICAL warning)'),
+            ('OEE',                  'CAMBIO_SI_NO',             'OEE row tags whether a changeover occurred during that OF',           'green'),
+            ('OEE',                  'PCT_OEE_PCT_RENDIMIENTO',  'OEE row reports % OEE and % Rendimiento',                             'green'),
+            ('TIEMPO',               'H_TOT',                    'tiempo container -> total hours',                                     'green'),
+            ('TIEMPO',               'PAR_TOT_1',                'tiempo container -> total stoppage (component 1 of changeover formula)','green'),
+            ('TIEMPO',               'PNP_2',                    'tiempo container -> planned non-production (component 2)',            'green'),
+            ('TIEMPO',               'LIMPIEZA_3',               'tiempo container -> cleaning time (component 3)',                     'green'),
+            ('TIEMPO',               'IDLE_4',                   'tiempo container -> idle time (component 4) - does NOT affect OEE',   'green'),
+            ('TIEMPO',               'PCT_DISP_CALID_REND',      'tiempo container -> the three OEE component percentages',             'green'),
+            ('VOLUMEN',              'HL',                       'volumen container -> hectolitres',                                    'green'),
+            ('VOLUMEN',              'UDS',                      'volumen container -> units',                                          'green'),
+            ('VOLUMEN',              'OEE',                      'volumen container -> redundant OEE for cross-check',                  'green')
+        ) AS t(entity_from, entity_to, semantics, edge_style)
+    """)
+
     # ------------------------------------------------------- _meta_tables
     con.execute("""
         CREATE OR REPLACE TABLE _meta_tables AS
@@ -284,11 +442,14 @@ def main() -> None:
             ('dim_line',                          'Production lines (L14/L17/L19) and their format states.'),
             ('dim_sku',                           'SKU master with product hierarchy and inferred format state.'),
             ('dim_theoretical_changeover_matrix', 'Theoretical changeover minutes per (linea, from_state, to_state) from Tabla CF Prat.'),
-            ('fact_runs',                         'Canonical per-OF run: OEE + lost-time decomposition + maintenance summary + change flags.'),
+            ('fact_runs',                         'Canonical per-OF run: OEE + lost-time decomposition + horas_cambio + maintenance + change flags.'),
             ('fact_lost_time',                    'Long-format lost-time per OF and category (minutes).'),
             ('fact_changeovers',                  'Per-OF transitions on the same line with previous SKU/state and theoretical reference.'),
             ('fact_limpieza',                     'Standalone LIMPIEZA / cleaning WOs.'),
-            ('fact_plan_vs_actual_2026',          'May 2026 Blue Yonder plan aligned with actual production.')
+            ('fact_plan_vs_actual_2026',          'May 2026 Blue Yonder plan aligned with actual production.'),
+            ('fact_diario_hl_planif',             'Daily HL planning long-format (linea, sku, fecha, metric, value) — Programa Prod vs Acordado and 9 churn metrics for May 18-24 2026.'),
+            ('_meta_formulas',                    'Damm OEE & changeover formulas extracted from the data-model diagram.'),
+            ('_meta_relationships',               'Edges from Damm''s data-model diagram (CAMBIOS, OEE, TIEMPO, VOLUMEN, ...).')
         ) AS t(table_name, description)
     """)
 
@@ -297,7 +458,8 @@ def main() -> None:
     for name in [
         "dim_line", "dim_sku", "dim_theoretical_changeover_matrix",
         "fact_runs", "fact_lost_time", "fact_changeovers", "fact_limpieza",
-        "fact_plan_vs_actual_2026",
+        "fact_plan_vs_actual_2026", "fact_diario_hl_planif",
+        "_meta_formulas", "_meta_relationships",
     ]:
         n = con.execute(f"SELECT COUNT(*) FROM {name}").fetchone()[0]
         print(f"    {name:40s} {n:>7} rows")
