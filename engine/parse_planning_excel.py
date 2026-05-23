@@ -157,13 +157,16 @@ def _parse_diario_hl(xlsx_path: str | Path) -> pd.DataFrame:
     raw = raw.where(pd.notna(raw), None)
 
     headers_row = raw.iloc[0].tolist()
-    # Each day-block has 11 metric columns + a separator. Find day labels from headers.
+    # Each day-block has 11 metric columns + a separator. The first metric
+    # in each block is the "Programa Prod." HL number; the regex must be
+    # ANCHORED to the start of the header text so it doesn't also match
+    # "Artículos Programa Prod." (which would double-detect every day).
     days: list[tuple[str, int]] = []  # (date_str, starting_col_idx)
     for j, h in enumerate(headers_row):
         if h is None:
             continue
-        s = str(h)
-        m = re.search(r"Programa Prod\.?\s*\n?\s*(\d{1,2}/\d{1,2}/\d{4})", s)
+        s = str(h).strip()
+        m = re.match(r"^Programa Prod\.?\s*\n?\s*(\d{1,2}/\d{1,2}/\d{4})", s)
         if m:
             try:
                 d = pd.to_datetime(m.group(1), dayfirst=True).date()

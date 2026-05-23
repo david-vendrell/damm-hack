@@ -63,6 +63,36 @@ def build_feature_rows(
     # ============================================================ Group B: SKU enrichment
     out = out.merge(dim_sku, on="sku", how="left", suffixes=("", "_dim"))
 
+    # Brand-prefix fallback for SKUs not in dim_sku (new May 2026 SKUs).
+    # Damm naming: first 2-3 chars are the brand code (ED, VO, XI, FD, FDT, SK, …).
+    # For each unknown SKU we look up the most common marca / supramarca / familia
+    # of SKUs sharing the same 3-char prefix and use that for UI + model features.
+    if out["marca"].isna().any():
+        def _build_prefix_map(col: str, pfx_len: int) -> dict[str, str]:
+            d = dim_sku[["sku", col]].dropna()
+            if d.empty:
+                return {}
+            d = d.assign(pfx=d["sku"].str[:pfx_len])
+            return (
+                d.groupby("pfx")[col]
+                 .agg(lambda s: s.value_counts().idxmax())
+                 .to_dict()
+            )
+
+        for col in ("marca", "supramarca", "familia", "cerveza", "cbr",
+                    "tipo_envase", "estado_volumen"):
+            if col not in out.columns:
+                continue
+            pmap3 = _build_prefix_map(col, 3)
+            pmap2 = _build_prefix_map(col, 2)
+            need = out[col].isna()
+            if not need.any():
+                continue
+            out.loc[need, col] = (
+                out.loc[need, "sku"].astype(str).str[:3].map(pmap3)
+                .fillna(out.loc[need, "sku"].astype(str).str[:2].map(pmap2))
+            )
+
     # ============================================================ Group F: calendar
     out["fecha"] = pd.to_datetime(out["fecha"])
     out["dia_semana"] = out["fecha"].dt.weekday + 1
