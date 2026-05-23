@@ -15,9 +15,29 @@ import {
   XAxis,
   YAxis,
 } from 'recharts';
-import { Card, CardHeader, KPI, Pill, SectionTitle, Skeleton } from '@/components/ui';
+import {
+  Card,
+  CardHeader,
+  KPI,
+  Pill,
+  SectionTitle,
+  Select,
+  Skeleton,
+  StatBlock,
+  StatStrip,
+  type KPIDelta,
+} from '@/components/ui';
+import { BriefHero } from '@/components/brief-card';
+import { useScope } from '@/components/scope-provider';
 import { hl, pct } from '@/lib/utils';
-import type { Linea, ObservabilidadData, ObservabilidadDimensiones } from '@/types';
+import type {
+  Linea,
+  ObservabilidadData,
+  ObservabilidadDimensiones,
+  SavedChartDTO,
+} from '@/types';
+import { ChartBuilder } from './chart-builder';
+import { SavedChartsGrid } from './saved-charts-grid';
 
 const LINEAS: Linea[] = [14, 17, 19];
 const COLOR_DAMM = '#A4161A';
@@ -58,15 +78,17 @@ export function ObservabilidadView() {
     queryFn: () => jget<ObservabilidadDimensiones>('/api/observabilidad/dimensiones'),
   });
 
+  const { scope } = useScope();
   const [filtros, setFiltros] = useState<Filtros>({});
   const [granularidad, setGranularidad] = useState<'semanal' | 'mensual'>('mensual');
   const [overlay, setOverlay] = useState(false);
+  const [editing, setEditing] = useState<SavedChartDTO | null>(null);
 
-  // Default año = más reciente
+  // Default año = más reciente. Línea sync con scope global (ScopeBar).
   const defaultAnio = dims.data?.anios[0];
   const efectivos: Filtros = {
     anio: filtros.anio ?? defaultAnio,
-    linea: filtros.linea,
+    linea: scope.linea ?? filtros.linea,
     marca: filtros.marca,
     formato: filtros.formato,
     canal: filtros.canal,
@@ -94,36 +116,31 @@ export function ObservabilidadView() {
   const vacio = !cargando && d.kpis.ofs === 0;
 
   return (
-    <div className="space-y-10">
-      <header className="flex items-end justify-between gap-6">
-        <SectionTitle subtitle="Histórico real de líneas 14 · 17 · 19 — El Prat.">
-          Observabilidad
-        </SectionTitle>
-        {d?.rangoFechas && (
-          <div className="pb-1 text-xs text-muted num">
-            {d.rangoFechas.desde} → {d.rangoFechas.hasta}
-          </div>
-        )}
-      </header>
+    <div className="space-y-8">
+      {/* Brief de turno hero (answers-first) */}
+      <BriefHero />
 
-      {/* Filtros */}
-      <Card>
-        <div className="grid grid-cols-2 gap-4 px-5 py-4 md:grid-cols-5">
+      {/* Editorial divider + secondary filters */}
+      <div className="flex items-end justify-between gap-6 border-b border-hairline pb-4">
+        <div>
+          <div className="eyebrow text-ink-3">Refinar</div>
+          <p className="mt-1 text-xs text-ink-3">
+            Filtros adicionales al alcance del periodo en el ScopeBar
+            {d?.rangoFechas && (
+              <span className="ml-2 num">
+                · {d.rangoFechas.desde} → {d.rangoFechas.hasta}
+              </span>
+            )}
+          </p>
+        </div>
+        <div className="grid grid-cols-2 gap-3 md:grid-cols-4 md:w-[640px]">
           <Select
             label="Año"
             value={efectivos.anio ? String(efectivos.anio) : ''}
             options={(dims.data?.anios ?? []).map((a) => ({ v: String(a), l: String(a) }))}
             onChange={(v) => setFiltros((f) => ({ ...f, anio: v ? Number(v) : undefined }))}
             placeholder="Todos"
-          />
-          <Select
-            label="Línea"
-            value={efectivos.linea ? String(efectivos.linea) : ''}
-            options={(dims.data?.lineas ?? []).map((l) => ({ v: String(l), l: `Línea ${l}` }))}
-            onChange={(v) =>
-              setFiltros((f) => ({ ...f, linea: v ? (Number(v) as Linea) : undefined }))
-            }
-            placeholder="Todas"
+            size="sm"
           />
           <Select
             label="Marca"
@@ -131,6 +148,7 @@ export function ObservabilidadView() {
             options={(dims.data?.marcas ?? []).map((m) => ({ v: m, l: m }))}
             onChange={(v) => setFiltros((f) => ({ ...f, marca: v || undefined }))}
             placeholder="Todas"
+            size="sm"
           />
           <Select
             label="Formato"
@@ -138,6 +156,7 @@ export function ObservabilidadView() {
             options={(dims.data?.formatos ?? []).map((f) => ({ v: f, l: f }))}
             onChange={(v) => setFiltros((f) => ({ ...f, formato: v || undefined }))}
             placeholder="Todos"
+            size="sm"
           />
           <Select
             label="Canal"
@@ -145,49 +164,103 @@ export function ObservabilidadView() {
             options={(dims.data?.canales ?? []).map((c) => ({ v: c, l: c }))}
             onChange={(v) => setFiltros((f) => ({ ...f, canal: v || undefined }))}
             placeholder="Todos"
+            size="sm"
           />
         </div>
-      </Card>
+      </div>
 
-      {/* KPIs */}
-      <section
-        aria-label="Indicadores principales"
-        className="grid grid-cols-2 gap-4 md:grid-cols-5"
-      >
+      {/* KPI strip — sparse Dribbble-style with dark delta pills */}
+      <section aria-label="Indicadores principales">
         {cargando ? (
-          Array.from({ length: 5 }).map((_, i) => <Skeleton key={i} className="h-24" />)
+          <div className="grid grid-cols-2 gap-4 md:grid-cols-5">
+            {Array.from({ length: 5 }).map((_, i) => (
+              <Skeleton key={i} className="h-24" />
+            ))}
+          </div>
         ) : (
-          <>
-            <Kpi
+          <StatStrip>
+            <StatBlock
               label="OEE"
               value={pct(d.kpis.oee, 1)}
-              delta={deltaPts(d.kpis.oee, prev.data?.kpis.oee)}
-              accent
+              accent="damm"
+              delta={ptsDelta(d.kpis.oee, prev.data?.kpis.oee, 'vs año anterior')}
+              divider
             />
-            <Kpi
+            <StatBlock
               label="Disponibilidad"
               value={pct(d.kpis.disponibilidad, 1)}
-              delta={deltaPts(d.kpis.disponibilidad, prev.data?.kpis.disponibilidad)}
+              delta={ptsDelta(d.kpis.disponibilidad, prev.data?.kpis.disponibilidad, 'vs año anterior')}
+              divider
             />
-            <Kpi
+            <StatBlock
               label="Rendimiento"
               value={pct(d.kpis.rendimiento, 1)}
-              delta={deltaPts(d.kpis.rendimiento, prev.data?.kpis.rendimiento)}
+              delta={ptsDelta(d.kpis.rendimiento, prev.data?.kpis.rendimiento, 'vs año anterior')}
+              divider
             />
-            <Kpi
+            <StatBlock
               label="Volumen"
               value={hl(d.kpis.volumenHl)}
-              delta={deltaPct(d.kpis.volumenHl, prev.data?.kpis.volumenHl)}
+              accent="gold"
+              delta={pctDelta(d.kpis.volumenHl, prev.data?.kpis.volumenHl, 'vs año anterior')}
+              divider
             />
-            <Kpi
+            <StatBlock
               label="OFs con cambio"
               value={pct(d.kpis.pctCambios, 0)}
-              hint={`${d.kpis.ofs.toLocaleString('es-ES')} OFs`}
-              delta={deltaPts(d.kpis.pctCambios, prev.data?.kpis.pctCambios)}
+              delta={ptsDelta(d.kpis.pctCambios, prev.data?.kpis.pctCambios, 'vs año anterior')}
             />
-          </>
+          </StatStrip>
         )}
       </section>
+
+      {!cargando && (
+        <section aria-label="Indicadores secundarios">
+          <StatStrip>
+            <StatBlock
+              label="Horas cambio"
+              value={Math.round(d.kpis.horasCambio).toLocaleString('es-ES')}
+              unit="h"
+              divider
+            />
+            <StatBlock
+              label="Mantenimiento"
+              value={Math.round(d.kpis.horasMantenimiento).toLocaleString('es-ES')}
+              unit="h"
+              divider
+            />
+            <StatBlock
+              label="Plan vs Real · May'26"
+              value={d.kpis.planHl > 0 ? pct(d.kpis.fillRate, 0) : '—'}
+              accent={d.kpis.planHl > 0 ? 'moss' : undefined}
+              divider
+            />
+            <StatBlock
+              label="Limpieza / CIP"
+              value={Math.round(d.kpis.horasLimpieza).toLocaleString('es-ES')}
+              unit="h"
+            />
+          </StatStrip>
+          <div className="mt-2 grid grid-cols-2 gap-3 text-[11px] text-ink-3 md:grid-cols-4 px-6">
+            <span>
+              {d.kpis.horasCambioPorOfCambio > 0
+                ? `${d.kpis.horasCambioPorOfCambio.toFixed(2)} h / OF con cambio`
+                : '—'}
+            </span>
+            <span>
+              {Math.round(d.kpis.nLlamadasMant).toLocaleString('es-ES')} llamadas · {pct(d.kpis.pctTiempoMant, 1)} t.
+            </span>
+            <span>
+              {d.kpis.planHl > 0
+                ? `${hl(d.kpis.actualHl)} / ${hl(d.kpis.planHl)}`
+                : 'Sin datos de plan'}
+            </span>
+            <span>
+              {d.kpis.nLimpiezaWos} WOs · CIP {pct(d.kpis.pctTiempoCip, 1)} t.
+            </span>
+          </div>
+        </section>
+      )}
 
       {vacio && (
         <Card>
@@ -359,7 +432,7 @@ export function ObservabilidadView() {
             <Card aria-label="Pérdidas de tiempo">
               <CardHeader
                 title="¿Dónde se va el tiempo?"
-                subtitle="horas totales por concepto de pérdida"
+                subtitle="horas totales por componente de pérdida (sin doble conteo del paro)"
               />
               <div className="h-64 px-3 py-4">
                 {cargando ? (
@@ -388,8 +461,8 @@ export function ObservabilidadView() {
                         type="category"
                         dataKey="concepto"
                         stroke="#6B6B6B"
-                        tick={{ fontSize: 12 }}
-                        width={130}
+                        tick={{ fontSize: 11 }}
+                        width={180}
                       />
                       <Tooltip
                         cursor={{ fill: 'rgba(0,0,0,0.03)' }}
@@ -506,6 +579,190 @@ export function ObservabilidadView() {
               </div>
             </Card>
           </section>
+
+          {/* Constructor de gráficos y panel guardado */}
+          <section aria-label="Constructor de gráficos" className="space-y-4">
+            <SectionTitle subtitle="Compón una métrica, segmenta, filtra y guárdala como tarjeta del panel.">
+              Constructor de gráficos
+            </SectionTitle>
+            <ChartBuilder
+              initialConfig={editing?.config ?? null}
+              editingId={editing?.id ?? null}
+              initialName={editing?.nombre ?? ''}
+              onSaved={() => setEditing(null)}
+              onCancelEdit={() => setEditing(null)}
+            />
+            <SavedChartsGrid onEdit={(c) => setEditing(c)} />
+          </section>
+
+          {/* Changeover real vs teórico + Limpieza */}
+          <section className="grid grid-cols-1 gap-4 lg:grid-cols-2">
+            <Card aria-label="Cambio real vs teórico">
+              <CardHeader
+                title="Cambio real vs teórico por línea"
+                subtitle="minutos totales (fact_changeovers · matriz CF Prat)"
+              />
+              <div className="h-64 px-3 py-4">
+                {cargando ? (
+                  <Skeleton className="h-full" />
+                ) : (
+                  <ResponsiveContainer width="100%" height="100%">
+                    <BarChart
+                      data={d.cambioPorLinea}
+                      margin={{ top: 8, right: 16, left: 0, bottom: 8 }}
+                    >
+                      <CartesianGrid stroke="#E6E0D6" strokeDasharray="3 3" vertical={false} />
+                      <XAxis
+                        dataKey="linea"
+                        tickFormatter={(v) => `L${v}`}
+                        stroke="#6B6B6B"
+                        tick={{ fontSize: 12 }}
+                      />
+                      <YAxis
+                        stroke="#6B6B6B"
+                        tick={{ fontSize: 12 }}
+                        tickFormatter={(v) =>
+                          v >= 1000 ? `${(v / 1000).toFixed(1)}k` : String(v)
+                        }
+                      />
+                      <Tooltip
+                        cursor={{ fill: 'rgba(0,0,0,0.03)' }}
+                        contentStyle={{
+                          background: '#fff',
+                          border: '1px solid #E6E0D6',
+                          borderRadius: 8,
+                        }}
+                        formatter={(v: number) =>
+                          `${Math.round(v).toLocaleString('es-ES')} min`
+                        }
+                        labelFormatter={(l) => `Línea ${l}`}
+                      />
+                      <Legend wrapperStyle={{ fontSize: 12 }} />
+                      <Bar dataKey="teoricoMin" name="Teórico" fill={COLOR_LINE_19} radius={[6, 6, 0, 0]} />
+                      <Bar dataKey="realMin" name="Real" fill={COLOR_DAMM} radius={[6, 6, 0, 0]} />
+                    </BarChart>
+                  </ResponsiveContainer>
+                )}
+              </div>
+            </Card>
+
+            <Card aria-label="Limpieza por línea">
+              <CardHeader
+                title="Limpieza por línea"
+                subtitle="WOs LIMPIEZA · horas totales"
+              />
+              <div className="h-64 px-3 py-4">
+                {cargando ? (
+                  <Skeleton className="h-full" />
+                ) : (
+                  <ResponsiveContainer width="100%" height="100%">
+                    <BarChart
+                      data={d.limpiezaPorLinea}
+                      margin={{ top: 8, right: 16, left: 0, bottom: 8 }}
+                    >
+                      <CartesianGrid stroke="#E6E0D6" strokeDasharray="3 3" vertical={false} />
+                      <XAxis
+                        dataKey="linea"
+                        tickFormatter={(v) => `L${v}`}
+                        stroke="#6B6B6B"
+                        tick={{ fontSize: 12 }}
+                      />
+                      <YAxis
+                        stroke="#6B6B6B"
+                        tick={{ fontSize: 12 }}
+                        tickFormatter={(v) =>
+                          v >= 1000 ? `${(v / 1000).toFixed(1)}k` : String(v)
+                        }
+                      />
+                      <Tooltip
+                        cursor={{ fill: 'rgba(0,0,0,0.03)' }}
+                        contentStyle={{
+                          background: '#fff',
+                          border: '1px solid #E6E0D6',
+                          borderRadius: 8,
+                        }}
+                        formatter={(v: number, name) =>
+                          name === 'nWos'
+                            ? [`${Math.round(v)} WOs`, 'WOs']
+                            : [`${Math.round(v)} h`, name === 'horas' ? 'Total' : 'Intervención']
+                        }
+                        labelFormatter={(l) => `Línea ${l}`}
+                      />
+                      <Legend wrapperStyle={{ fontSize: 12 }} />
+                      <Bar dataKey="horas" name="Total" fill={COLOR_DAMM} radius={[6, 6, 0, 0]} />
+                      <Bar
+                        dataKey="horasIntervencion"
+                        name="Intervención"
+                        fill={COLOR_LINE_14}
+                        radius={[6, 6, 0, 0]}
+                      />
+                    </BarChart>
+                  </ResponsiveContainer>
+                )}
+              </div>
+            </Card>
+          </section>
+
+          {/* Plan vs Actual May 2026 */}
+          {!cargando && d && (d.planVsActual.totales.hlPlan > 0 || d.planVsActual.totales.hlActual > 0) ? (
+            <Card aria-label="Plan vs Real Mayo 2026">
+              <CardHeader
+                title="Plan vs Real (May'26)"
+                subtitle={`${d.planVsActual.totales.nMatched} matched · ${d.planVsActual.totales.nOnlyPlan} solo plan · ${d.planVsActual.totales.nOnlyActual} solo real`}
+              />
+              <div className="h-72 px-3 py-4">
+                {cargando ? (
+                  <Skeleton className="h-full" />
+                ) : (
+                  <ResponsiveContainer width="100%" height="100%">
+                    <BarChart
+                      data={d.planVsActual.topGap}
+                      margin={{ top: 8, right: 16, left: 0, bottom: 8 }}
+                    >
+                      <CartesianGrid stroke="#E6E0D6" strokeDasharray="3 3" vertical={false} />
+                      <XAxis
+                        dataKey="sku"
+                        stroke="#6B6B6B"
+                        tick={{ fontSize: 11 }}
+                        interval={0}
+                        angle={-30}
+                        textAnchor="end"
+                        height={70}
+                      />
+                      <YAxis
+                        stroke="#6B6B6B"
+                        tick={{ fontSize: 12 }}
+                        tickFormatter={(v) =>
+                          v >= 1000 ? `${(v / 1000).toFixed(1)}k` : String(v)
+                        }
+                      />
+                      <Tooltip
+                        cursor={{ fill: 'rgba(0,0,0,0.03)' }}
+                        contentStyle={{
+                          background: '#fff',
+                          border: '1px solid #E6E0D6',
+                          borderRadius: 8,
+                        }}
+                        formatter={(v: number) => hl(v)}
+                        labelFormatter={(l, p) => {
+                          const pl = (p as { payload?: { linea: number; denominacion: string | null } }[])?.[0]?.payload;
+                          return `${pl?.denominacion ?? l} · L${pl?.linea ?? ''}`;
+                        }}
+                      />
+                      <Legend wrapperStyle={{ fontSize: 12 }} />
+                      <Bar dataKey="hlPlan" name="Plan" fill={COLOR_LINE_19} radius={[6, 6, 0, 0]} />
+                      <Bar
+                        dataKey="hlActual"
+                        name="Real"
+                        fill={COLOR_DAMM}
+                        radius={[6, 6, 0, 0]}
+                      />
+                    </BarChart>
+                  </ResponsiveContainer>
+                )}
+              </div>
+            </Card>
+          ) : null}
         </>
       )}
 
@@ -513,40 +770,6 @@ export function ObservabilidadView() {
         Histórico disponible solo de {efectivos.anio ?? '—'}. Las comparativas vs año
         anterior se activarán al ingerir más años.
       </p>
-    </div>
-  );
-}
-
-function Select({
-  label,
-  value,
-  options,
-  onChange,
-  placeholder,
-}: {
-  label: string;
-  value: string;
-  options: { v: string; l: string }[];
-  onChange: (v: string) => void;
-  placeholder: string;
-}) {
-  return (
-    <div>
-      <label className="mb-1.5 block text-xs uppercase tracking-wider text-muted">
-        {label}
-      </label>
-      <select
-        value={value}
-        onChange={(e) => onChange(e.target.value)}
-        className="w-full rounded border border-hairline bg-surface px-3 py-2 text-sm focus:border-ink focus:outline-none"
-      >
-        <option value="">{placeholder}</option>
-        {options.map((o) => (
-          <option key={o.v} value={o.v}>
-            {o.l}
-          </option>
-        ))}
-      </select>
     </div>
   );
 }
@@ -561,24 +784,20 @@ function Kpi({
   label: string;
   value: string;
   hint?: string;
-  delta?: string;
-  accent?: boolean;
+  delta?: KPIDelta;
+  accent?: 'damm' | 'gold' | 'moss';
 }) {
-  return <KPI label={label} value={value} hint={delta ?? hint} accent={accent} />;
+  return <KPI label={label} value={value} hint={hint} delta={delta} accent={accent} />;
 }
 
-function deltaPts(curr: number, prev?: number): string | undefined {
+function ptsDelta(curr: number, prev: number | undefined, label?: string): KPIDelta | undefined {
   if (prev === undefined) return undefined;
-  const d = (curr - prev) * 100;
-  const sign = d >= 0 ? '+' : '';
-  return `${sign}${d.toFixed(1)} pts vs año anterior`;
+  return { value: (curr - prev) * 100, format: 'pts', label };
 }
 
-function deltaPct(curr: number, prev?: number): string | undefined {
+function pctDelta(curr: number, prev: number | undefined, label?: string): KPIDelta | undefined {
   if (prev === undefined || prev === 0) return undefined;
-  const d = ((curr - prev) / prev) * 100;
-  const sign = d >= 0 ? '+' : '';
-  return `${sign}${d.toFixed(1)}% vs año anterior`;
+  return { value: ((curr - prev) / prev) * 100, format: 'pct', label };
 }
 
 interface SeriePunto {

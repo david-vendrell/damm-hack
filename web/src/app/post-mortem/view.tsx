@@ -15,7 +15,7 @@ import {
   XAxis,
   YAxis,
 } from 'recharts';
-import { Card, CardHeader, KPI, Pill, SectionTitle, Skeleton } from '@/components/ui';
+import { Card, CardHeader, KPI, Pill, SectionTitle, Skeleton, StatBlock, StatStrip } from '@/components/ui';
 import { hl, pct, pts } from '@/lib/utils';
 import type { CambioIneficienteDTO, DistribucionSku, Linea, PostMortemResumen, SkuLineaInfo } from '@/types';
 
@@ -43,16 +43,38 @@ export function PostMortemView() {
       </header>
 
       {/* KPIs */}
-      <section className="grid grid-cols-1 gap-4 md:grid-cols-4">
+      <section>
         {resumen.isLoading || !resumen.data ? (
-          Array.from({ length: 4 }).map((_, i) => <Skeleton key={i} className="h-24" />)
+          <div className="grid grid-cols-1 gap-4 md:grid-cols-4">
+            {Array.from({ length: 4 }).map((_, i) => (
+              <Skeleton key={i} className="h-24" />
+            ))}
+          </div>
         ) : (
-          <>
-            <KPI label="Pérdida evitable media" value={`${resumen.data.perdidaEvitablePts.toFixed(1)} pts`} hint="vs. día bueno (p80) del mismo SKU-línea" accent />
-            <KPI label="OFs por debajo de su alcanzable" value={`${resumen.data.ofsPorDebajoPct}%`} hint={`de ${resumen.data.ofsAnalizadas.toLocaleString('es-ES')} OFs`} />
-            <KPI label="Hl latentes" value={hl(resumen.data.hlLatente)} hint="potencial recuperable" />
-            <KPI label="OFs analizadas" value={resumen.data.ofsAnalizadas.toLocaleString('es-ES')} hint="histórico 2025 hasta hoy" />
-          </>
+          <StatStrip>
+            <StatBlock
+              label="Pérdida evitable media"
+              value={`${resumen.data.perdidaEvitablePts.toFixed(1)}`}
+              unit="pp"
+              accent="damm"
+              divider
+            />
+            <StatBlock
+              label="OFs por debajo de su alcanzable"
+              value={`${resumen.data.ofsPorDebajoPct}%`}
+              divider
+            />
+            <StatBlock
+              label="Hl latentes"
+              value={hl(resumen.data.hlLatente)}
+              accent="gold"
+              divider
+            />
+            <StatBlock
+              label="OFs analizadas"
+              value={resumen.data.ofsAnalizadas.toLocaleString('es-ES')}
+            />
+          </StatStrip>
         )}
       </section>
 

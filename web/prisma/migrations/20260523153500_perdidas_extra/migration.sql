@@ -1,0 +1,4 @@
+-- AlterTable
+ALTER TABLE "OfHecho" ADD COLUMN "hIdle" REAL;
+ALTER TABLE "OfHecho" ADD COLUMN "hLimpieza" REAL;
+ALTER TABLE "OfHecho" ADD COLUMN "hPnp" REAL;
