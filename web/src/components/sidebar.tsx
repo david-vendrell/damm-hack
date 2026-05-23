@@ -1,11 +1,12 @@
 'use client';
 
+import { useQuery } from '@tanstack/react-query';
 import Link from 'next/link';
 import { usePathname } from 'next/navigation';
 import { cn } from '@/lib/utils';
+import type { SavedChartDTO } from '@/types';
 import {
   Activity,
-  AlertTriangle,
   ChartBar,
   ChevronsUpDown,
   ClipboardCheck,
@@ -24,16 +25,25 @@ const NAV = [
   { href: '/urgencias', label: 'Urgencias', icon: Siren, hint: 'Incidencias · acciones' },
 ];
 
-const FAVORITES = [
-  { label: 'OEE Línea 17 — Semanal', href: '/observabilidad?linea=17&periodo=wtd' },
-  { label: 'Pérdidas por causa', href: '/post-mortem' },
-];
+const MAX_FAVORITES = 5;
+
+async function jget<T>(url: string): Promise<T> {
+  const r = await fetch(url);
+  if (!r.ok) throw new Error('fetch_failed');
+  return r.json();
+}
 
 export function Sidebar() {
   const pathname = usePathname();
+  const savedCharts = useQuery({
+    queryKey: ['saved-charts'],
+    queryFn: () => jget<{ charts: SavedChartDTO[] }>('/api/observabilidad/charts'),
+  });
+  const favorites = (savedCharts.data?.charts ?? []).slice(0, MAX_FAVORITES);
+  const showFavorites = favorites.length > 0 || savedCharts.isLoading;
 
   return (
-    <aside className="flex h-screen w-[252px] shrink-0 flex-col border-r border-hairline bg-linen/70">
+    <aside className="sticky top-0 flex h-screen w-[252px] shrink-0 flex-col border-r border-hairline bg-linen/70">
       {/* Brand */}
       <div className="px-5 pt-6 pb-5">
         <div className="flex items-center justify-between">
@@ -66,27 +76,46 @@ export function Sidebar() {
         </button>
       </div>
 
-      {/* Favoritos */}
-      <div className="mt-6 px-3">
-        <div className="flex items-center justify-between px-2 pb-1.5">
-          <span className="eyebrow flex items-center gap-1.5 text-ink-3">
-            <Star className="h-2.5 w-2.5" strokeWidth={2} /> Favoritos
-          </span>
-          <ChevronsUpDown className="h-3 w-3 text-ink-4" strokeWidth={1.75} />
+      {/* Favoritos — auto-pobladas con los gráficos guardados */}
+      {showFavorites && (
+        <div className="mt-6 px-3">
+          <div className="flex items-center justify-between px-2 pb-1.5">
+            <span className="eyebrow flex items-center gap-1.5 text-ink-3">
+              <Star className="h-2.5 w-2.5" strokeWidth={2} /> Mis gráficos
+            </span>
+            <Link
+              href="/observabilidad?view=graficos"
+              className="text-[10px] text-ink-4 transition-colors hover:text-ink"
+            >
+              Ver todos
+            </Link>
+          </div>
+          {savedCharts.isLoading ? (
+            <ul className="space-y-1 px-2">
+              {Array.from({ length: 3 }).map((_, i) => (
+                <li
+                  key={i}
+                  className="h-3 w-full animate-pulse rounded bg-hairline/40"
+                />
+              ))}
+            </ul>
+          ) : (
+            <ul className="space-y-0.5">
+              {favorites.map((c) => (
+                <li key={c.id}>
+                  <Link
+                    href={`/observabilidad?view=graficos&chartId=${c.id}`}
+                    className="block truncate rounded-soft px-2 py-1.5 text-xs text-ink-2 transition-colors hover:bg-surface hover:text-ink"
+                    title={c.nombre}
+                  >
+                    {c.nombre}
+                  </Link>
+                </li>
+              ))}
+            </ul>
+          )}
         </div>
-        <ul className="space-y-0.5">
-          {FAVORITES.map((f) => (
-            <li key={f.href}>
-              <Link
-                href={f.href}
-                className="block rounded-soft px-2 py-1.5 text-xs text-ink-2 transition-colors hover:bg-surface hover:text-ink"
-              >
-                {f.label}
-              </Link>
-            </li>
-          ))}
-        </ul>
-      </div>
+      )}
 
       {/* Nav */}
       <nav className="mt-6 flex-1 overflow-y-auto px-3">

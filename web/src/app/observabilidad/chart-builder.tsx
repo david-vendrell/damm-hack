@@ -2,7 +2,7 @@
 
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { useEffect, useMemo, useState } from 'react';
-import { Card, CardHeader, Pill, Skeleton } from '@/components/ui';
+import { Button, Card, Pill, Skeleton } from '@/components/ui';
 import { cn } from '@/lib/utils';
 import type {
   Aggregation,
@@ -22,9 +22,12 @@ import { ChartPreview, resolveViz } from './chart-preview';
 
 const TEMPORAL_DIMS: DimensionKey[] = ['dia', 'semana', 'mesIso', 'fechaFin', 'mes', 'semanaIso'];
 
-const VIZ_OPTIONS: { v: VizType; l: string }[] = [
+const VIZ_TEMPORAL: { v: VizType; l: string }[] = [
   { v: 'auto', l: 'Auto' },
   { v: 'line', l: 'Línea' },
+];
+
+const VIZ_COMPARACION: { v: VizType; l: string }[] = [
   { v: 'bar', l: 'Barras' },
   { v: 'stackedBar', l: 'Apiladas' },
   { v: 'donut', l: 'Donut' },
@@ -136,8 +139,6 @@ export function ChartBuilder({
   const dimensions = metricas.data?.dimensions ?? [];
   const nonTemporalDims = dimensions.filter((d) => !d.temporal);
 
-  // The "effective" dimension for the query: if user picked a non-temporal dim,
-  // use it. If user picked time/none → derive from granularity.
   const effectiveDimension: DimensionKey | undefined = useMemo(() => {
     if (config.viz === 'bigNumber') return undefined;
     if (!config.dimension) return undefined;
@@ -186,42 +187,41 @@ export function ChartBuilder({
   const setRange = (patch: Partial<DateRange>) =>
     setConfig((c) => ({ ...c, dateRange: { ...c.dateRange, ...patch } }));
 
+  const isPristine =
+    config.measure === DEFAULT_CONFIG.measure &&
+    config.dimension === DEFAULT_CONFIG.dimension &&
+    config.filters.length === 0 &&
+    !config.breakdown;
+
   return (
     <Card aria-label="Constructor de gráficos">
-      <CardHeader
-        title={editingId ? 'Editando gráfico' : 'Constructor de gráficos'}
-        subtitle="Métrica, agregación, segmentos, filtros y rango — la previa se actualiza al instante."
-        action={
-          <div className="flex items-center gap-3">
-            <button
-              onClick={() => {
-                setConfig(DEFAULT_CONFIG);
-                setName('');
-                onCancelEdit?.();
-              }}
-              className="text-xs text-muted underline-offset-4 hover:text-ink hover:underline"
-            >
-              Limpiar
-            </button>
-            {editingId && (
-              <>
-                <span className="h-3 w-px bg-hairline" />
-                <button
-                  onClick={() => onCancelEdit?.()}
-                  className="text-xs text-muted underline-offset-4 hover:text-ink hover:underline"
-                >
-                  Cancelar edición
-                </button>
-              </>
-            )}
-          </div>
-        }
-      />
+      {/* Thin toolbar: only what's needed */}
+      <div className="flex items-center justify-between border-b border-hairline px-5 py-2.5">
+        <div className="flex items-center gap-2 text-[11px] uppercase tracking-wider text-ink-3">
+          <span className="inline-block h-1.5 w-1.5 rounded-full bg-damm" />
+          {editingId ? 'Editando gráfico' : 'Nuevo gráfico'}
+        </div>
+        <div className="flex items-center gap-3">
+          <button
+            onClick={() => {
+              setConfig(DEFAULT_CONFIG);
+              setName('');
+              onCancelEdit?.();
+            }}
+            className="text-xs text-muted underline-offset-4 hover:text-ink hover:underline"
+          >
+            Limpiar
+          </button>
+        </div>
+      </div>
 
       <div className="grid grid-cols-1 gap-0 lg:grid-cols-[320px_1fr]">
-        {/* Left panel */}
+        {/* Left panel: controls */}
         <div className="space-y-4 border-b border-hairline p-5 lg:border-b-0 lg:border-r">
-          <FieldGroup label="Métrica">
+          <FieldGroup
+            label="1 · Métrica"
+            hint="Qué quieres medir y cómo agregarlo"
+          >
             <select
               value={config.measure}
               onChange={(e) => setConfig((c) => ({ ...c, measure: e.target.value as MeasureKey }))}
@@ -248,7 +248,10 @@ export function ChartBuilder({
             )}
           </FieldGroup>
 
-          <FieldGroup label="Dimensión (eje X)">
+          <FieldGroup
+            label="2 · Eje X"
+            hint="En qué se reparte la medida"
+          >
             <select
               value={config.dimension ?? ''}
               onChange={(e) =>
@@ -259,7 +262,7 @@ export function ChartBuilder({
               }
               className="w-full rounded border border-hairline bg-surface px-2.5 py-1.5 text-sm focus:border-ink focus:outline-none"
             >
-              <option value="">— Tiempo (auto) —</option>
+              <option value="">— Sin eje (KPI único) —</option>
               <optgroup label="Tiempo">
                 <option value="dia">Día</option>
                 <option value="semana">Semana</option>
@@ -288,7 +291,10 @@ export function ChartBuilder({
             )}
           </FieldGroup>
 
-          <FieldGroup label="Desglose (opcional)">
+          <FieldGroup
+            label="3 · Desglose"
+            hint="Opcional · segunda dimensión que separa series"
+          >
             <select
               value={config.breakdown ?? ''}
               onChange={(e) =>
@@ -310,7 +316,7 @@ export function ChartBuilder({
             </select>
           </FieldGroup>
 
-          <FieldGroup label="Rango de fechas">
+          <FieldGroup label="4 · Rango de fechas">
             <div className="flex flex-wrap gap-1.5">
               {PRESETS.map((p) => (
                 <Pill
@@ -339,7 +345,10 @@ export function ChartBuilder({
             </div>
           </FieldGroup>
 
-          <FieldGroup label="Filtros">
+          <FieldGroup
+            label="5 · Filtros"
+            hint="AND entre filtros · OR entre valores de un mismo filtro"
+          >
             <FiltersEditor
               filters={config.filters}
               dimensions={nonTemporalDims}
@@ -348,7 +357,7 @@ export function ChartBuilder({
           </FieldGroup>
 
           {!isTemporalDim && effectiveDimension && (
-            <FieldGroup label="Top N">
+            <FieldGroup label="6 · Top N">
               <div className="flex gap-1.5">
                 {[5, 10, 20, 50].map((n) => (
                   <Pill
@@ -364,58 +373,50 @@ export function ChartBuilder({
           )}
 
           <FieldGroup label="Visualización">
-            <div className="flex flex-wrap gap-1.5">
-              {VIZ_OPTIONS.map((v) => (
-                <Pill
-                  key={v.v}
-                  active={config.viz === v.v}
-                  onClick={() => setConfig((c) => ({ ...c, viz: v.v }))}
-                >
-                  {v.l}
-                </Pill>
-              ))}
+            <div className="space-y-2">
+              <div>
+                <div className="mb-1 text-[10px] uppercase tracking-wider text-ink-4">
+                  Series temporales
+                </div>
+                <div className="flex flex-wrap gap-1.5">
+                  {VIZ_TEMPORAL.map((v) => (
+                    <Pill
+                      key={v.v}
+                      active={config.viz === v.v}
+                      onClick={() => setConfig((c) => ({ ...c, viz: v.v }))}
+                    >
+                      {v.l}
+                    </Pill>
+                  ))}
+                </div>
+              </div>
+              <div>
+                <div className="mb-1 text-[10px] uppercase tracking-wider text-ink-4">
+                  Comparación / composición
+                </div>
+                <div className="flex flex-wrap gap-1.5">
+                  {VIZ_COMPARACION.map((v) => (
+                    <Pill
+                      key={v.v}
+                      active={config.viz === v.v}
+                      onClick={() => setConfig((c) => ({ ...c, viz: v.v }))}
+                    >
+                      {v.l}
+                    </Pill>
+                  ))}
+                </div>
+              </div>
             </div>
           </FieldGroup>
-
-          <div className="pt-3">
-            <label className="mb-1.5 block text-xs uppercase tracking-wider text-muted">
-              Nombre del gráfico
-            </label>
-            <div className="flex gap-2">
-              <input
-                value={name}
-                onChange={(e) => setName(e.target.value)}
-                placeholder="p.ej. OEE mensual por línea"
-                className="flex-1 rounded border border-hairline bg-surface px-2.5 py-1.5 text-sm focus:border-ink focus:outline-none"
-              />
-              <button
-                onClick={() => save.mutate()}
-                disabled={save.isPending || !name.trim()}
-                className={cn(
-                  'rounded border px-3 py-1.5 text-sm font-medium transition-colors',
-                  save.isPending || !name.trim()
-                    ? 'border-hairline bg-surface text-muted'
-                    : 'border-ink bg-ink text-surface hover:bg-damm hover:border-damm',
-                )}
-              >
-                {editingId ? 'Actualizar' : 'Guardar'}
-              </button>
-            </div>
-            {save.isError && (
-              <div className="mt-1 text-xs text-damm">No se pudo guardar.</div>
-            )}
-          </div>
         </div>
 
-        {/* Right panel */}
+        {/* Right panel: live preview */}
         <div className="p-5">
           <div className="h-[360px] rounded border border-hairline bg-surface">
             {data.isLoading || metricas.isLoading || !data.data ? (
               <Skeleton className="h-full" />
             ) : data.data.rows.length === 0 && data.data.total === undefined && !data.data.dimension ? (
-              <div className="flex h-full items-center justify-center text-sm text-muted">
-                Sin datos para la combinación elegida.
-              </div>
+              <PreviewEmpty pristine={isPristine} />
             ) : (
               <ChartPreview
                 data={data.data}
@@ -439,15 +440,69 @@ export function ChartBuilder({
           )}
         </div>
       </div>
+
+      {/* Sticky footer: name + save spans full width */}
+      <div className="sticky bottom-0 z-10 flex items-center gap-3 border-t border-hairline bg-surface/95 px-5 py-3 backdrop-blur">
+        <label className="hidden text-[11px] uppercase tracking-wider text-ink-3 md:block">
+          Nombre
+        </label>
+        <input
+          value={name}
+          onChange={(e) => setName(e.target.value)}
+          placeholder={editingId ? 'Renombrar gráfico' : 'p.ej. OEE mensual por línea'}
+          className="flex-1 rounded border border-hairline bg-surface px-3 py-1.5 text-sm focus:border-ink focus:outline-none"
+        />
+        <Button
+          variant="primary"
+          size="md"
+          onClick={() => save.mutate()}
+          disabled={save.isPending || !name.trim()}
+        >
+          {save.isPending
+            ? 'Guardando…'
+            : editingId
+              ? 'Actualizar gráfico'
+              : 'Guardar gráfico'}
+        </Button>
+      </div>
+      {save.isError && (
+        <div className="border-t border-damm/30 bg-damm-soft/20 px-5 py-1.5 text-xs text-damm">
+          No se pudo guardar. Vuelve a intentarlo.
+        </div>
+      )}
     </Card>
   );
 }
 
-function FieldGroup({ label, children }: { label: string; children: React.ReactNode }) {
+function FieldGroup({
+  label,
+  hint,
+  children,
+}: {
+  label: string;
+  hint?: string;
+  children: React.ReactNode;
+}) {
   return (
     <div>
-      <label className="mb-1.5 block text-xs uppercase tracking-wider text-muted">{label}</label>
+      <div className="mb-1.5 flex items-baseline justify-between gap-2">
+        <label className="block text-xs uppercase tracking-wider text-muted">{label}</label>
+        {hint && <span className="text-[10px] text-ink-4">{hint}</span>}
+      </div>
       {children}
+    </div>
+  );
+}
+
+function PreviewEmpty({ pristine }: { pristine: boolean }) {
+  return (
+    <div className="flex h-full flex-col items-center justify-center gap-2 px-6 text-center">
+      <div className="eyebrow text-ink-4">Previa</div>
+      <p className="max-w-sm text-sm text-ink-3">
+        {pristine
+          ? 'Ajusta la métrica, el eje y el rango en el panel de la izquierda. La previa se actualiza al instante.'
+          : 'Sin datos para la combinación elegida. Prueba a ampliar el rango o quitar filtros.'}
+      </p>
     </div>
   );
 }

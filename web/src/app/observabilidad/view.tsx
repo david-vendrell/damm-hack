@@ -1,7 +1,8 @@
 'use client';
 
 import { useQuery } from '@tanstack/react-query';
-import { useMemo, useState } from 'react';
+import { useSearchParams } from 'next/navigation';
+import { useEffect, useState } from 'react';
 import {
   Bar,
   BarChart,
@@ -18,9 +19,8 @@ import {
 import {
   Card,
   CardHeader,
-  KPI,
   Pill,
-  SectionTitle,
+  SegmentedControl,
   Select,
   Skeleton,
   StatBlock,
@@ -39,13 +39,19 @@ import type {
 import { ChartBuilder } from './chart-builder';
 import { SavedChartsGrid } from './saved-charts-grid';
 
-const LINEAS: Linea[] = [14, 17, 19];
 const COLOR_DAMM = '#A4161A';
 const COLOR_DAMM_DARK = '#7E1116';
 const COLOR_LINE_14 = '#7E1116';
 const COLOR_LINE_17 = '#A4161A';
 const COLOR_LINE_19 = '#D85D62';
 const MES_LABEL = ['', 'Ene', 'Feb', 'Mar', 'Abr', 'May', 'Jun', 'Jul', 'Ago', 'Sep', 'Oct', 'Nov', 'Dic'];
+
+type Layer = 'resumen' | 'graficos';
+
+const LAYER_OPTIONS: { v: Layer; l: string }[] = [
+  { v: 'resumen', l: 'Resumen' },
+  { v: 'graficos', l: 'Gráficos' },
+];
 
 async function jget<T>(url: string): Promise<T> {
   const r = await fetch(url);
@@ -73,6 +79,7 @@ function qs(f: Filtros): string {
 }
 
 export function ObservabilidadView() {
+  const searchParams = useSearchParams();
   const dims = useQuery({
     queryKey: ['obs-dimensiones'],
     queryFn: () => jget<ObservabilidadDimensiones>('/api/observabilidad/dimensiones'),
@@ -83,6 +90,26 @@ export function ObservabilidadView() {
   const [granularidad, setGranularidad] = useState<'semanal' | 'mensual'>('mensual');
   const [overlay, setOverlay] = useState(false);
   const [editing, setEditing] = useState<SavedChartDTO | null>(null);
+  const [layer, setLayer] = useState<Layer>(
+    searchParams?.get('view') === 'graficos' ? 'graficos' : 'resumen',
+  );
+
+  // Honor ?view=… and ?chartId=… deep-links (e.g. from sidebar Favoritos)
+  useEffect(() => {
+    const v = searchParams?.get('view');
+    if (v === 'graficos' || v === 'resumen') setLayer(v);
+  }, [searchParams]);
+
+  const deepLinkChartId = searchParams?.get('chartId') ?? null;
+  const savedCharts = useQuery({
+    queryKey: ['saved-charts'],
+    queryFn: () => jget<{ charts: SavedChartDTO[] }>('/api/observabilidad/charts'),
+  });
+  useEffect(() => {
+    if (!deepLinkChartId || !savedCharts.data) return;
+    const hit = savedCharts.data.charts.find((c) => c.id === deepLinkChartId);
+    if (hit) setEditing(hit);
+  }, [deepLinkChartId, savedCharts.data]);
 
   // Default año = más reciente. Línea sync con scope global (ScopeBar).
   const defaultAnio = dims.data?.anios[0];
@@ -120,6 +147,76 @@ export function ObservabilidadView() {
       {/* Brief de turno hero (answers-first) */}
       <BriefHero />
 
+      {/* Layer switcher: Resumen / Gráficos */}
+      <div className="flex items-center justify-between gap-4">
+        <SegmentedControl<Layer>
+          value={layer}
+          options={LAYER_OPTIONS}
+          onChange={setLayer}
+        />
+        <span className="text-[11px] text-ink-3">
+          {layer === 'resumen'
+            ? 'Indicadores y gráficos fijos del periodo.'
+            : 'Compón tus propios gráficos a partir de cualquier métrica.'}
+        </span>
+      </div>
+
+      {layer === 'resumen' && (
+        <ResumenLayer
+          d={d}
+          prev={prev.data}
+          dims={dims.data}
+          efectivos={efectivos}
+          setFiltros={setFiltros}
+          cargando={cargando}
+          vacio={vacio}
+          granularidad={granularidad}
+          setGranularidad={setGranularidad}
+          overlay={overlay}
+          setOverlay={setOverlay}
+        />
+      )}
+
+      {layer === 'graficos' && (
+        <GraficosLayer
+          editing={editing}
+          onEdit={(c) => setEditing(c)}
+          onClearEdit={() => setEditing(null)}
+        />
+      )}
+    </div>
+  );
+}
+
+interface ResumenLayerProps {
+  d: ObservabilidadData | undefined;
+  prev: ObservabilidadData | undefined;
+  dims: ObservabilidadDimensiones | undefined;
+  efectivos: Filtros;
+  setFiltros: (fn: (f: Filtros) => Filtros) => void;
+  cargando: boolean;
+  vacio: boolean;
+  granularidad: 'semanal' | 'mensual';
+  setGranularidad: (g: 'semanal' | 'mensual') => void;
+  overlay: boolean;
+  setOverlay: (fn: (o: boolean) => boolean) => void;
+}
+
+function ResumenLayer({
+  d,
+  prev,
+  dims,
+  efectivos,
+  setFiltros,
+  cargando,
+  vacio,
+  granularidad,
+  setGranularidad,
+  overlay,
+  setOverlay,
+}: ResumenLayerProps) {
+  return (
+    <>
       {/* Editorial divider + secondary filters */}
       <div className="flex items-end justify-between gap-6 border-b border-hairline pb-4">
         <div>
@@ -137,7 +234,7 @@ export function ObservabilidadView() {
           <Select
             label="Año"
             value={efectivos.anio ? String(efectivos.anio) : ''}
-            options={(dims.data?.anios ?? []).map((a) => ({ v: String(a), l: String(a) }))}
+            options={(dims?.anios ?? []).map((a) => ({ v: String(a), l: String(a) }))}
             onChange={(v) => setFiltros((f) => ({ ...f, anio: v ? Number(v) : undefined }))}
             placeholder="Todos"
             size="sm"
@@ -145,7 +242,7 @@ export function ObservabilidadView() {
           <Select
             label="Marca"
             value={efectivos.marca ?? ''}
-            options={(dims.data?.marcas ?? []).map((m) => ({ v: m, l: m }))}
+            options={(dims?.marcas ?? []).map((m) => ({ v: m, l: m }))}
             onChange={(v) => setFiltros((f) => ({ ...f, marca: v || undefined }))}
             placeholder="Todas"
             size="sm"
@@ -153,7 +250,7 @@ export function ObservabilidadView() {
           <Select
             label="Formato"
             value={efectivos.formato ?? ''}
-            options={(dims.data?.formatos ?? []).map((f) => ({ v: f, l: f }))}
+            options={(dims?.formatos ?? []).map((f) => ({ v: f, l: f }))}
             onChange={(v) => setFiltros((f) => ({ ...f, formato: v || undefined }))}
             placeholder="Todos"
             size="sm"
@@ -161,7 +258,7 @@ export function ObservabilidadView() {
           <Select
             label="Canal"
             value={efectivos.canal ?? ''}
-            options={(dims.data?.canales ?? []).map((c) => ({ v: c, l: c }))}
+            options={(dims?.canales ?? []).map((c) => ({ v: c, l: c }))}
             onChange={(v) => setFiltros((f) => ({ ...f, canal: v || undefined }))}
             placeholder="Todos"
             size="sm"
@@ -171,7 +268,7 @@ export function ObservabilidadView() {
 
       {/* KPI strip — sparse Dribbble-style with dark delta pills */}
       <section aria-label="Indicadores principales">
-        {cargando ? (
+        {cargando || !d ? (
           <div className="grid grid-cols-2 gap-4 md:grid-cols-5">
             {Array.from({ length: 5 }).map((_, i) => (
               <Skeleton key={i} className="h-24" />
@@ -183,38 +280,38 @@ export function ObservabilidadView() {
               label="OEE"
               value={pct(d.kpis.oee, 1)}
               accent="damm"
-              delta={ptsDelta(d.kpis.oee, prev.data?.kpis.oee, 'vs año anterior')}
+              delta={ptsDelta(d.kpis.oee, prev?.kpis.oee, 'vs año anterior')}
               divider
             />
             <StatBlock
               label="Disponibilidad"
               value={pct(d.kpis.disponibilidad, 1)}
-              delta={ptsDelta(d.kpis.disponibilidad, prev.data?.kpis.disponibilidad, 'vs año anterior')}
+              delta={ptsDelta(d.kpis.disponibilidad, prev?.kpis.disponibilidad, 'vs año anterior')}
               divider
             />
             <StatBlock
               label="Rendimiento"
               value={pct(d.kpis.rendimiento, 1)}
-              delta={ptsDelta(d.kpis.rendimiento, prev.data?.kpis.rendimiento, 'vs año anterior')}
+              delta={ptsDelta(d.kpis.rendimiento, prev?.kpis.rendimiento, 'vs año anterior')}
               divider
             />
             <StatBlock
               label="Volumen"
               value={hl(d.kpis.volumenHl)}
               accent="gold"
-              delta={pctDelta(d.kpis.volumenHl, prev.data?.kpis.volumenHl, 'vs año anterior')}
+              delta={pctDelta(d.kpis.volumenHl, prev?.kpis.volumenHl, 'vs año anterior')}
               divider
             />
             <StatBlock
               label="OFs con cambio"
               value={pct(d.kpis.pctCambios, 0)}
-              delta={ptsDelta(d.kpis.pctCambios, prev.data?.kpis.pctCambios, 'vs año anterior')}
+              delta={ptsDelta(d.kpis.pctCambios, prev?.kpis.pctCambios, 'vs año anterior')}
             />
           </StatStrip>
         )}
       </section>
 
-      {!cargando && (
+      {!cargando && d && (
         <section aria-label="Indicadores secundarios">
           <StatStrip>
             <StatBlock
@@ -270,7 +367,7 @@ export function ObservabilidadView() {
         </Card>
       )}
 
-      {!vacio && (
+      {!vacio && d && (
         <>
           {/* OEE temporal */}
           <section aria-label="OEE en el tiempo">
@@ -580,21 +677,6 @@ export function ObservabilidadView() {
             </Card>
           </section>
 
-          {/* Constructor de gráficos y panel guardado */}
-          <section aria-label="Constructor de gráficos" className="space-y-4">
-            <SectionTitle subtitle="Compón una métrica, segmenta, filtra y guárdala como tarjeta del panel.">
-              Constructor de gráficos
-            </SectionTitle>
-            <ChartBuilder
-              initialConfig={editing?.config ?? null}
-              editingId={editing?.id ?? null}
-              initialName={editing?.nombre ?? ''}
-              onSaved={() => setEditing(null)}
-              onCancelEdit={() => setEditing(null)}
-            />
-            <SavedChartsGrid onEdit={(c) => setEditing(c)} />
-          </section>
-
           {/* Changeover real vs teórico + Limpieza */}
           <section className="grid grid-cols-1 gap-4 lg:grid-cols-2">
             <Card aria-label="Cambio real vs teórico">
@@ -704,7 +786,7 @@ export function ObservabilidadView() {
           </section>
 
           {/* Plan vs Actual May 2026 */}
-          {!cargando && d && (d.planVsActual.totales.hlPlan > 0 || d.planVsActual.totales.hlActual > 0) ? (
+          {(d.planVsActual.totales.hlPlan > 0 || d.planVsActual.totales.hlActual > 0) ? (
             <Card aria-label="Plan vs Real Mayo 2026">
               <CardHeader
                 title="Plan vs Real (May'26)"
@@ -765,29 +847,51 @@ export function ObservabilidadView() {
           ) : null}
         </>
       )}
-
-      <p className="text-center text-xs text-muted">
-        Histórico disponible solo de {efectivos.anio ?? '—'}. Las comparativas vs año
-        anterior se activarán al ingerir más años.
-      </p>
-    </div>
+    </>
   );
 }
 
-function Kpi({
-  label,
-  value,
-  hint,
-  delta,
-  accent,
-}: {
-  label: string;
-  value: string;
-  hint?: string;
-  delta?: KPIDelta;
-  accent?: 'damm' | 'gold' | 'moss';
-}) {
-  return <KPI label={label} value={value} hint={hint} delta={delta} accent={accent} />;
+interface GraficosLayerProps {
+  editing: SavedChartDTO | null;
+  onEdit: (chart: SavedChartDTO) => void;
+  onClearEdit: () => void;
+}
+
+function GraficosLayer({ editing, onEdit, onClearEdit }: GraficosLayerProps) {
+  return (
+    <div className="space-y-6">
+      {/* Editorial header for the layer */}
+      <div className="flex items-end justify-between gap-6 border-b border-hairline pb-4">
+        <div>
+          <div className="eyebrow text-ink-3">Componer</div>
+          <h2 className="serif mt-1 text-2xl font-semibold tracking-tight text-ink">
+            {editing ? `Editando · ${editing.nombre}` : 'Constructor de gráficos'}
+          </h2>
+          <p className="mt-1 text-xs text-ink-3">
+            Define una métrica, segmenta, filtra y guárdala en tu panel. La previa se actualiza al instante.
+          </p>
+        </div>
+        {editing && (
+          <button
+            onClick={onClearEdit}
+            className="text-xs text-muted underline-offset-4 hover:text-ink hover:underline"
+          >
+            Cancelar edición
+          </button>
+        )}
+      </div>
+
+      <ChartBuilder
+        initialConfig={editing?.config ?? null}
+        editingId={editing?.id ?? null}
+        initialName={editing?.nombre ?? ''}
+        onSaved={() => onClearEdit()}
+        onCancelEdit={() => onClearEdit()}
+      />
+
+      <SavedChartsGrid onEdit={onEdit} />
+    </div>
+  );
 }
 
 function ptsDelta(curr: number, prev: number | undefined, label?: string): KPIDelta | undefined {
