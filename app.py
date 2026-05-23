@@ -3,8 +3,10 @@
 Upload a Damm planning Excel (`Planificado producciones` or `Diario Hl_Planif`).
 Two actions:
   • Predecir OEE      → per-block OEE forecast (p10 / p50 / p90).
-  • Optimizar plan    → wrap the model in a search loop, propose a better
-                        feasible arrangement, return the swap log + before/after.
+  • Optimizar plan    → V2 flexible-scheduling solver: reassigns each OF to the
+                        best (línea × día × turno) subject to deadline +
+                        LINE_FORMAT_COMPAT + historical feasibility.
+                        Supports p50 (expected) and p90 (aggressive ceiling) modes.
 """
 
 from __future__ import annotations
@@ -18,7 +20,7 @@ from engine import (
     parse_planning_excel,
     build_feature_rows,
     predict_blocks,
-    optimize_plan,
+    optimize_plan_v2,
 )
 
 ROOT = Path(__file__).resolve().parent
@@ -37,17 +39,17 @@ def _predict_pipeline(xlsx_file: str) -> tuple[pd.DataFrame, dict]:
     return preds, meta
 
 
-def _optimize_pipeline(xlsx_file: str) -> tuple[dict, dict]:
+def _optimize_pipeline_v2(xlsx_file: str, objective: str) -> tuple[dict, dict]:
     blocks, meta = parse_planning_excel(xlsx_file, FEASIBILITY)
     if blocks.empty:
         return {}, meta
-    result = optimize_plan(
+    result = optimize_plan_v2(
         blocks,
         lookups_dir=str(LOOKUPS),
         models_dir=str(MODELS),
-        max_iter=10,
-        enable_cross_line=True,
-        time_budget_sec=60,        # cap for the Space — keep request <60 s
+        objective=objective,
+        time_budget_sec=75,
+        max_local_search_iter=30,
     )
     return result, meta
 
@@ -107,30 +109,32 @@ def _top_drivers_table(preds: pd.DataFrame, n_rows: int = 20) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
-def _swap_log_table(swap_log: list[dict]) -> pd.DataFrame:
-    if not swap_log:
-        return pd.DataFrame(columns=["#", "Tipo", "Línea", "Descripción", "Δ OEE pts"])
+def _per_line_compare_table_v2(per_line: dict, objective: str) -> pd.DataFrame:
     rows = []
-    for s in swap_log:
+    obj_label = "p50 (esperado)" if objective == "p50" else "p90 (techo)"
+    for ln in sorted(per_line.keys()):
+        v = per_line[ln]
         rows.append({
-            "#":           s.get("iteration", ""),
-            "Tipo":        s.get("kind", ""),
-            "Línea":       s.get("linea", ""),
-            "Descripción": s.get("description", ""),
-            "Δ OEE pts":   f"{s.get('delta_pts_global', 0):+.3f}",
+            "Línea":                       f"L{ln}",
+            f"OEE actual ({obj_label})":   _fmt_pct(v["baseline"]),
+            f"OEE optimizada":              _fmt_pct(v["optimized"]),
+            "Δ pts":                        f"{v['delta_pts']:+.2f}",
+            "Bloques (antes → después)":   f"{v['n_blocks_baseline']} → {v['n_blocks_optimized']}",
         })
     return pd.DataFrame(rows)
 
 
-def _per_line_compare_table(per_line: dict) -> pd.DataFrame:
+def _swap_log_v2_table(swap_log: list[dict]) -> pd.DataFrame:
+    if not swap_log:
+        return pd.DataFrame(columns=["#", "SKU", "Desde", "Hacia", "Descripción"])
     rows = []
-    for ln in sorted(per_line.keys()):
-        v = per_line[ln]
+    for i, s in enumerate(swap_log, 1):
         rows.append({
-            "Línea":          f"L{ln}",
-            "OEE actual":     _fmt_pct(v["baseline"]),
-            "OEE optimizada": _fmt_pct(v["optimized"]),
-            "Δ pts":          f"{v['delta_pts']:+.2f}",
+            "#":            i,
+            "SKU":          s["sku"],
+            "Desde":        f"L{s['from_linea']} / {s['from_fecha']} / {s['from_turno']}",
+            "Hacia":        f"L{s['to_linea']} / {s['to_fecha']} / {s['to_turno']}",
+            "Descripción":  s.get("description", ""),
         })
     return pd.DataFrame(rows)
 
@@ -172,45 +176,64 @@ def predict(file_obj):
     return (summary_md, _line_summary(preds), _block_table(preds), _top_drivers_table(preds))
 
 
-def optimize(file_obj, progress=gr.Progress(track_tqdm=False)):
+def optimize_v2(file_obj, aggressive: bool, progress=gr.Progress(track_tqdm=False)):
     if file_obj is None:
         return ("⚠️ Sube un fichero .xlsx primero.",
                 pd.DataFrame(), pd.DataFrame())
     path = file_obj if isinstance(file_obj, str) else file_obj.name
-    progress(0.05, desc="Parseando Excel…")
+    objective = "p90" if aggressive else "p50"
+    obj_label = "p90 (perseguir techo)" if aggressive else "p50 (esperado)"
+    progress(0.05, desc=f"Parseando Excel (modo {obj_label})…")
     try:
-        progress(0.20, desc="Construyendo features y baseline…")
-        result, meta = _optimize_pipeline(path)
+        progress(0.20, desc="Construyendo lookup intrínseco para todos los slots…")
+        result, meta = _optimize_pipeline_v2(path, objective)
     except Exception as exc:
         return (f"❌ Error optimizando: {exc}", pd.DataFrame(), pd.DataFrame())
 
-    if not result:
+    if not result or not result.get("best_blocks", pd.DataFrame()).shape[0]:
         return ("⚠️ No se han encontrado bloques válidos para optimizar.",
                 pd.DataFrame(), pd.DataFrame())
 
-    progress(0.95, desc="Generando resumen…")
     baseline = result["baseline_score"]
     optimized = result["optimized_score"]
     delta_pts = result["delta_oee_pts"]
-    n_swaps = result["n_iterations"]
+    n_changes = result["n_changes"]
     elapsed = result["elapsed_sec"]
-    trunc = " · ⏱️ tiempo agotado, mostrando el mejor encontrado" if result.get("truncated") else ""
+    fallback = result.get("fallback_to_baseline", False)
+    audit_ok = result["audit"].get("all_ok", True)
+
+    progress(0.95, desc="Generando resumen…")
+
+    status_emoji = "⚠️" if fallback else ("✅" if audit_ok else "⚠️")
+    fallback_note = (
+        "\n\n> ⚠️ El plan original ya es localmente óptimo (no se encontraron movimientos "
+        "que mejoren la OEE prevista respetando los plazos y la compatibilidad de líneas)."
+        if fallback else ""
+    )
 
     summary_md = f"""
-### Resumen — Optimización
-- **OEE actual** (HL-ponderada, p50):  **{_fmt_pct(baseline)}**
-- **OEE optimizada** (HL-ponderada, p50):  **{_fmt_pct(optimized)}**
-- **Ganancia:**  **{delta_pts:+.2f} puntos de OEE**
-- **{n_swaps}** intercambios aplicados en **{elapsed:.1f} s**{trunc}
+### Resumen — Optimización V2 (modo: {obj_label})
+- **OEE actual** (HL-ponderada, {objective}): **{_fmt_pct(baseline)}**
+- **OEE optimizada** (HL-ponderada, {objective}): **{_fmt_pct(optimized)}**
+- **Ganancia:** **{delta_pts:+.2f} puntos de OEE**
+- **{n_changes}** bloques reasignados en **{elapsed:.1f} s**  {status_emoji}
 
-> El optimizador explora **intercambios dentro de cada línea** y **movimientos entre líneas**
-> (sólo para SKUs físicamente compatibles, según Damm: L14 = 1/3 + 1/2, L17 = 1/3,
-> L19 = 1/3 + 1/2 + 2/5), y conserva los HL totales por SKU.
+> El optimizador V2 reasigna cada OF a la mejor combinación de **línea × día × turno**
+> respetando:
+> · el **plazo (deadline)** del OF (puede moverse a un día más temprano, no más tarde),
+> · el **volumen total** por SKU (los HL no cambian),
+> · la **compatibilidad línea-formato** confirmada por Damm
+>   (L14 = 1/3 + 1/2 · L17 = 1/3 · L19 = 1/3 + 1/2 + 2/5),
+> · y la **factibilidad histórica** (≥ 3 ejecuciones previas en la línea destino).
+>
+> Cada movimiento se valida con un re-cálculo completo del modelo: sólo se aplica si la
+> OEE real (con el contexto de SKU anterior) mejora.
+{fallback_note}
 """.strip()
 
     return (summary_md,
-            _per_line_compare_table(result["per_line"]),
-            _swap_log_table(result["swap_log"]))
+            _per_line_compare_table_v2(result["per_line"], objective),
+            _swap_log_v2_table(result["swap_log"]))
 
 
 # ------------------------------------------------------------------ UI
@@ -226,8 +249,8 @@ with gr.Blocks(
     gr.Markdown("""
     # LineWise · OEE forecaster & optimizer
     Sube el Excel de planificación de la semana (**`Planificado producciones`** o **`Diario Hl_Planif`**).
-    - **Predecir OEE** — detecta el formato, enriquece cada bloque con el histórico de 2025 y devuelve la predicción (p10 / p50 / p90) por bloque.
-    - **Optimizar plan** — además, ejecuta una búsqueda local que prueba intercambios y movimientos entre líneas para proponer una mejor disposición.
+    - **Predecir OEE** — detecta el formato y devuelve la predicción de OEE (p10 / p50 / p90) por bloque.
+    - **Optimizar plan** — reasigna cada OF a la mejor combinación de **línea × día × turno** respetando plazos, volúmenes y la compatibilidad línea-formato. Activa el modo agresivo para perseguir el techo p90.
 
     *Damm × Engineering HUB Hackathon · canning lines 14 · 17 · 19 at El Prat.*
     """)
@@ -242,11 +265,19 @@ with gr.Blocks(
             with gr.Row():
                 btn_predict  = gr.Button("Predecir OEE",  variant="primary")
                 btn_optimize = gr.Button("Optimizar plan", variant="secondary")
+            aggressive = gr.Checkbox(
+                label="Modo agresivo (perseguir el techo p90)",
+                value=False,
+                info=(
+                    "Activado: optimiza el techo p90 — recomendaciones más ambiciosas. "
+                    "Desactivado: optimiza el OEE esperado p50."
+                ),
+            )
             gr.Markdown(
                 "> El sistema usa un modelo **LightGBM quantile** entrenado con "
                 "~2 200 OFs históricos de 2025. **`p90`** = techo de OEE razonablemente "
-                "alcanzable para esa combinación. El optimizador respeta la "
-                "**compatibilidad línea-formato** confirmada por Damm."
+                "alcanzable. El optimizador respeta los **plazos y volúmenes** del plan "
+                "original y la **compatibilidad línea-formato** confirmada por Damm."
             )
 
         with gr.Column(scale=2):
@@ -261,7 +292,8 @@ with gr.Blocks(
         with gr.TabItem("Alternativas recomendadas (optimizador)"):
             opt_summary = gr.Markdown(
                 "> Pulsa **Optimizar plan** tras subir un fichero. La búsqueda tarda "
-                "entre 30 s y 60 s — verás el progreso encima del botón."
+                "entre 30 s y 75 s — verás el progreso encima del botón. Activa el "
+                "**Modo agresivo** para perseguir el techo p90 con movimientos más ambiciosos."
             )
             with gr.Row():
                 opt_line_tbl = gr.Dataframe(
@@ -269,7 +301,7 @@ with gr.Blocks(
                     interactive=False,
                 )
             opt_swap_tbl = gr.Dataframe(
-                label="Intercambios aplicados",
+                label="Reasignaciones aplicadas",
                 interactive=False, wrap=True,
             )
 
@@ -279,8 +311,8 @@ with gr.Blocks(
         outputs=[summary, line_tbl, blocks_tbl, drivers_tbl],
     )
     btn_optimize.click(
-        fn=optimize,
-        inputs=file_in,
+        fn=optimize_v2,
+        inputs=[file_in, aggressive],
         outputs=[opt_summary, opt_line_tbl, opt_swap_tbl],
     )
 
