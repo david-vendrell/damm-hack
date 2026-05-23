@@ -124,20 +124,26 @@ export function ChartPreview({ data, measure, viz, dimTemporal, height = 320, co
     return (
       <div className="h-full overflow-auto px-3 py-2">
         <table className="min-w-full text-sm">
-          <thead className="sticky top-0 bg-surface">
+          <thead className="sticky top-0 z-10 bg-surface">
             <tr className="border-b border-hairline text-left text-xs uppercase tracking-wider text-muted">
-              <th className="px-3 py-2 font-medium">Dimensión</th>
+              <th className="sticky left-0 bg-surface px-3 py-2 font-medium">Dimensión</th>
               {cols.map((c) => (
                 <th key={c} className="px-3 py-2 text-right font-medium num">
-                  {c === 'value' ? measure?.label ?? 'Valor' : c}
+                  <span className="block max-w-[160px] truncate" title={c === 'value' ? measure?.label ?? 'Valor' : c}>
+                    {c === 'value' ? measure?.label ?? 'Valor' : c}
+                  </span>
                 </th>
               ))}
             </tr>
           </thead>
           <tbody>
             {data.rows.map((r) => (
-              <tr key={r.key} className="border-b border-hairline/60">
-                <td className="px-3 py-1.5">{r.label}</td>
+              <tr key={r.key} className="border-b border-hairline/60 hover:bg-cream/40">
+                <td className="sticky left-0 bg-surface px-3 py-1.5 group-hover:bg-cream/40">
+                  <span className="block max-w-[220px] truncate" title={r.label}>
+                    {r.label}
+                  </span>
+                </td>
                 {cols.map((c) => (
                   <td key={c} className="px-3 py-1.5 text-right num">
                     {formatter(c === 'value' ? r.value : r.breakdown?.[c] ?? 0)}

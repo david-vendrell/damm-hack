@@ -61,6 +61,15 @@ const AGG_LABEL: Record<Aggregation, string> = {
   p90: 'P90',
 };
 
+const VIZ_LABEL: Record<Exclude<VizType, 'auto'>, string> = {
+  line: 'Línea',
+  bar: 'Barras',
+  stackedBar: 'Barras apiladas',
+  donut: 'Donut',
+  bigNumber: 'KPI',
+  table: 'Tabla',
+};
+
 const DEFAULT_CONFIG: ChartConfig = {
   measure: 'oee',
   aggregation: 'avg',
@@ -217,7 +226,7 @@ export function ChartBuilder({
 
       <div className="grid grid-cols-1 gap-0 lg:grid-cols-[320px_1fr]">
         {/* Left panel: controls */}
-        <div className="space-y-4 border-b border-hairline p-5 lg:border-b-0 lg:border-r">
+        <div className="space-y-5 border-b border-hairline p-5 lg:border-b-0 lg:border-r">
           <FieldGroup
             label="1 · Métrica"
             hint="Qué quieres medir y cómo agregarlo"
@@ -411,11 +420,28 @@ export function ChartBuilder({
         </div>
 
         {/* Right panel: live preview */}
-        <div className="p-5">
-          <div className="h-[360px] rounded border border-hairline bg-surface">
-            {data.isLoading || metricas.isLoading || !data.data ? (
+        <div className="flex flex-col p-5">
+          <PreviewHeader
+            data={data.data}
+            measure={measureMeta}
+            viz={config.viz}
+            isTemporal={isTemporalDim}
+            filters={config.filters}
+            dimensions={nonTemporalDims}
+            onRemoveFilter={(dim) =>
+              setConfig((c) => ({ ...c, filters: c.filters.filter((f) => f.dim !== dim) }))
+            }
+          />
+          <div className="mt-3 h-[360px] rounded border border-hairline bg-surface">
+            {data.isLoading || metricas.isLoading ? (
               <Skeleton className="h-full" />
-            ) : data.data.rows.length === 0 && data.data.total === undefined && !data.data.dimension ? (
+            ) : data.isError ? (
+              <PreviewError onRetry={() => data.refetch()} />
+            ) : !data.data ? (
+              <Skeleton className="h-full" />
+            ) : data.data.rows.length === 0 &&
+              data.data.total === undefined &&
+              !data.data.dimension ? (
               <PreviewEmpty pristine={isPristine} />
             ) : (
               <ChartPreview
@@ -428,16 +454,6 @@ export function ChartBuilder({
             )}
           </div>
           <DataQualityNote data={data.data} loading={data.isLoading} />
-          {data.data && (
-            <div className="mt-2 text-xs text-muted">
-              {data.data.rows.length > 0
-                ? `${data.data.rows.length} segmento${data.data.rows.length === 1 ? '' : 's'}`
-                : data.data.total !== undefined
-                  ? 'KPI agregado'
-                  : ''}{' '}
-              · viz <span className="text-ink">{resolveViz(config.viz, data.data, isTemporalDim)}</span>
-            </div>
-          )}
         </div>
       </div>
 
@@ -490,6 +506,104 @@ function FieldGroup({
         {hint && <span className="text-[10px] text-ink-4">{hint}</span>}
       </div>
       {children}
+    </div>
+  );
+}
+
+function PreviewHeader({
+  data,
+  measure,
+  viz,
+  isTemporal,
+  filters,
+  dimensions,
+  onRemoveFilter,
+}: {
+  data?: QueryResult;
+  measure?: MeasureMeta;
+  viz: VizType;
+  isTemporal: boolean;
+  filters: Filter[];
+  dimensions: DimensionMeta[];
+  onRemoveFilter: (dim: DimensionKey) => void;
+}) {
+  const resolved = data ? resolveViz(viz, data, isTemporal) : null;
+  const isAuto = viz === 'auto';
+  const segmentCount = data?.rows.length ?? 0;
+  const dimLabel = dimensions.reduce<Record<string, string>>((acc, d) => {
+    acc[d.key] = d.label;
+    return acc;
+  }, {});
+  return (
+    <div className="space-y-2">
+      <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-[11px] text-ink-3">
+        {resolved && (
+          <span className="inline-flex items-center gap-1.5 rounded-pill border border-hairline bg-cream px-2 py-0.5">
+            {isAuto && (
+              <span className="text-[10px] uppercase tracking-wider text-ink-4">Auto →</span>
+            )}
+            <span className="font-medium text-ink-2">{VIZ_LABEL[resolved]}</span>
+          </span>
+        )}
+        {measure && (
+          <span className="num">
+            {measure.label}
+            {data?.dimension ? ` · ${data.dimension}` : ''}
+          </span>
+        )}
+        {data && (
+          <span className="num text-ink-4">
+            {segmentCount > 0
+              ? `${segmentCount} segmento${segmentCount === 1 ? '' : 's'}`
+              : data.total !== undefined
+                ? 'KPI agregado'
+                : ''}
+          </span>
+        )}
+      </div>
+      {filters.length > 0 && (
+        <div className="flex flex-wrap gap-1.5">
+          {filters.map((f) => (
+            <button
+              key={f.dim}
+              onClick={() => onRemoveFilter(f.dim)}
+              title="Quitar filtro"
+              className="group inline-flex items-center gap-1.5 rounded-pill border border-hairline bg-surface px-2 py-0.5 text-[11px] text-ink-2 hover:border-damm/40 hover:text-damm"
+            >
+              <span className="text-ink-3 group-hover:text-damm">
+                {dimLabel[f.dim] ?? f.dim}:
+              </span>
+              <span className="font-medium">
+                {f.values.length === 0
+                  ? 'sin valor'
+                  : f.values.length <= 2
+                    ? f.values.join(', ')
+                    : `${f.values.slice(0, 2).join(', ')} +${f.values.length - 2}`}
+              </span>
+              <span aria-hidden className="text-ink-4 group-hover:text-damm">
+                ×
+              </span>
+            </button>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function PreviewError({ onRetry }: { onRetry: () => void }) {
+  return (
+    <div className="flex h-full flex-col items-center justify-center gap-3 px-6 text-center">
+      <div className="eyebrow text-damm">Sin previa</div>
+      <p className="max-w-sm text-sm text-ink-3">
+        No se pudo cargar la consulta. Revisa la conexión o vuelve a intentarlo en unos segundos.
+      </p>
+      <button
+        onClick={onRetry}
+        className="rounded-pill border border-hairline px-3 py-1 text-xs text-ink-2 hover:border-ink hover:text-ink"
+      >
+        Reintentar
+      </button>
     </div>
   );
 }
