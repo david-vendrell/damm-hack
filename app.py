@@ -43,14 +43,17 @@ def _optimize_pipeline_v3(xlsx_file: str, objective: str) -> tuple[dict, dict]:
     blocks, meta = parse_planning_excel(xlsx_file, FEASIBILITY)
     if blocks.empty:
         return {}, meta
+    # HF Space free tier is ~5-8x slower than local on CPU-heavy LightGBM
+    # inference. We give a generous time budget and a smaller prev pool so
+    # the precompute finishes well before the search budget runs out.
     result = optimize_plan_v3(
         blocks,
         lookups_dir=str(LOOKUPS),
         models_dir=str(MODELS),
         objective=objective,
-        time_budget_sec=75,
+        time_budget_sec=240,   # was 75
         max_iter=30,
-        top_k_prevs=20,
+        top_k_prevs=10,        # was 20 — halves lookup size + precompute time
     )
     return result, meta
 
