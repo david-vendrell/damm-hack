@@ -20,7 +20,7 @@ from engine import (
     parse_planning_excel,
     build_feature_rows,
     predict_blocks,
-    optimize_plan_v2,
+    optimize_plan_v3,
 )
 
 ROOT = Path(__file__).resolve().parent
@@ -39,17 +39,18 @@ def _predict_pipeline(xlsx_file: str) -> tuple[pd.DataFrame, dict]:
     return preds, meta
 
 
-def _optimize_pipeline_v2(xlsx_file: str, objective: str) -> tuple[dict, dict]:
+def _optimize_pipeline_v3(xlsx_file: str, objective: str) -> tuple[dict, dict]:
     blocks, meta = parse_planning_excel(xlsx_file, FEASIBILITY)
     if blocks.empty:
         return {}, meta
-    result = optimize_plan_v2(
+    result = optimize_plan_v3(
         blocks,
         lookups_dir=str(LOOKUPS),
         models_dir=str(MODELS),
         objective=objective,
         time_budget_sec=75,
-        max_local_search_iter=30,
+        max_iter=30,
+        top_k_prevs=20,
     )
     return result, meta
 
@@ -124,17 +125,22 @@ def _per_line_compare_table_v2(per_line: dict, objective: str) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
-def _swap_log_v2_table(swap_log: list[dict]) -> pd.DataFrame:
+def _swap_log_v3_table(swap_log: list[dict]) -> pd.DataFrame:
     if not swap_log:
-        return pd.DataFrame(columns=["#", "SKU", "Desde", "Hacia", "Descripción"])
+        return pd.DataFrame(columns=["#", "SKU", "Desde", "Hacia", "ΔOEE pts",
+                                     "Δ cambio min", "Δ mant h", "Agrupa formato", "Descripción"])
     rows = []
     for i, s in enumerate(swap_log, 1):
         rows.append({
-            "#":            i,
-            "SKU":          s["sku"],
-            "Desde":        f"L{s['from_linea']} / {s['from_fecha']} / {s['from_turno']}",
-            "Hacia":        f"L{s['to_linea']} / {s['to_fecha']} / {s['to_turno']}",
-            "Descripción":  s.get("description", ""),
+            "#":              i,
+            "SKU":            s["sku"],
+            "Desde":          f"L{s['from_linea']} / {s['from_fecha']} / {s['from_turno']}",
+            "Hacia":          f"L{s['to_linea']} / {s['to_fecha']} / {s['to_turno']}",
+            "ΔOEE pts":       f"{s.get('delta_oee_pts', 0):+.2f}",
+            "Δ cambio min":   f"{s.get('delta_changeover_min', 0):+.0f}",
+            "Δ mant h":       f"{s.get('delta_maint_hours_close', 0):+.0f}",
+            "Agrupa formato": "Sí" if s.get("same_format_neighbour") else "",
+            "Descripción":    s.get("description", ""),
         })
     return pd.DataFrame(rows)
 
@@ -176,7 +182,7 @@ def predict(file_obj):
     return (summary_md, _line_summary(preds), _block_table(preds), _top_drivers_table(preds))
 
 
-def optimize_v2(file_obj, aggressive: bool, progress=gr.Progress(track_tqdm=False)):
+def optimize_v3(file_obj, aggressive: bool, progress=gr.Progress(track_tqdm=False)):
     if file_obj is None:
         return ("⚠️ Sube un fichero .xlsx primero.",
                 pd.DataFrame(), pd.DataFrame())
@@ -185,8 +191,8 @@ def optimize_v2(file_obj, aggressive: bool, progress=gr.Progress(track_tqdm=Fals
     obj_label = "p90 (perseguir techo)" if aggressive else "p50 (esperado)"
     progress(0.05, desc=f"Parseando Excel (modo {obj_label})…")
     try:
-        progress(0.20, desc="Construyendo lookup intrínseco para todos los slots…")
-        result, meta = _optimize_pipeline_v2(path, objective)
+        progress(0.15, desc="Construyendo lookup prev-aware (~30s)…")
+        result, meta = _optimize_pipeline_v3(path, objective)
     except Exception as exc:
         return (f"❌ Error optimizando: {exc}", pd.DataFrame(), pd.DataFrame())
 
@@ -199,41 +205,32 @@ def optimize_v2(file_obj, aggressive: bool, progress=gr.Progress(track_tqdm=Fals
     delta_pts = result["delta_oee_pts"]
     n_changes = result["n_changes"]
     elapsed = result["elapsed_sec"]
-    fallback = result.get("fallback_to_baseline", False)
     audit_ok = result["audit"].get("all_ok", True)
+    weekly = result.get("weekly_summary", "")
 
     progress(0.95, desc="Generando resumen…")
-
-    status_emoji = "⚠️" if fallback else ("✅" if audit_ok else "⚠️")
-    fallback_note = (
-        "\n\n> ⚠️ El plan original ya es localmente óptimo (no se encontraron movimientos "
-        "que mejoren la OEE prevista respetando los plazos y la compatibilidad de líneas)."
-        if fallback else ""
-    )
+    status_emoji = "✅" if audit_ok else "⚠️"
 
     summary_md = f"""
-### Resumen — Optimización V2 (modo: {obj_label})
+### Resumen — Optimización V3 (modo: {obj_label})
 - **OEE actual** (HL-ponderada, {objective}): **{_fmt_pct(baseline)}**
 - **OEE optimizada** (HL-ponderada, {objective}): **{_fmt_pct(optimized)}**
 - **Ganancia:** **{delta_pts:+.2f} puntos de OEE**
-- **{n_changes}** bloques reasignados en **{elapsed:.1f} s**  {status_emoji}
+- **{n_changes}** reasignaciones en **{elapsed:.1f} s**  {status_emoji}
 
-> El optimizador V2 reasigna cada OF a la mejor combinación de **línea × día × turno**
-> respetando:
-> · el **plazo (deadline)** del OF (puede moverse a un día más temprano, no más tarde),
-> · el **volumen total** por SKU (los HL no cambian),
-> · la **compatibilidad línea-formato** confirmada por Damm
->   (L14 = 1/3 + 1/2 · L17 = 1/3 · L19 = 1/3 + 1/2 + 2/5),
-> · y la **factibilidad histórica** (≥ 3 ejecuciones previas en la línea destino).
->
-> Cada movimiento se valida con un re-cálculo completo del modelo: sólo se aplica si la
-> OEE real (con el contexto de SKU anterior) mejora.
-{fallback_note}
+#### Resumen operacional
+{weekly}
+
+> V3 usa un **lookup prev-aware** (predicción para cada combinación de **(OF, línea×día×turno, SKU anterior)**)
+> en lugar del lookup ciego de V2. Cada movimiento se evalúa con el contexto *real* de
+> cascada y se reporta con métricas operacionales explícitas:
+> **ΔOEE pts · Δ minutos de cambio · Δ horas a mantenimiento · si agrupa formato**.
+> Respeta plazos, volúmenes y la compatibilidad línea-formato confirmada por Damm.
 """.strip()
 
     return (summary_md,
             _per_line_compare_table_v2(result["per_line"], objective),
-            _swap_log_v2_table(result["swap_log"]))
+            _swap_log_v3_table(result["swap_log"]))
 
 
 # ------------------------------------------------------------------ UI
@@ -311,7 +308,7 @@ with gr.Blocks(
         outputs=[summary, line_tbl, blocks_tbl, drivers_tbl],
     )
     btn_optimize.click(
-        fn=optimize_v2,
+        fn=optimize_v3,
         inputs=[file_in, aggressive],
         outputs=[opt_summary, opt_line_tbl, opt_swap_tbl],
     )
