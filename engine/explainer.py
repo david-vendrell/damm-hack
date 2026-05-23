@@ -8,17 +8,17 @@ Each move's reason mentions at least one of:
     · minutos de cambio ahorrados / añadidos
     · mantenimiento próximo evitado / afrontado
     · agrupación de formato preservada / rota
+
+V3.1 adds templates for incident-driven moves:
+    · `describe_priority_insert`  — for OF prioritario insertado en X
+    · `describe_eviction`         — for OF desplazado por OF prioritario
 """
 
 from __future__ import annotations
 
-from datetime import date
-
-import pandas as pd
-
 
 def describe_move(move: dict) -> str:
-    """Render one move into a single-line Spanish description.
+    """Render one optimization move into a single-line Spanish description.
 
     `move` must contain (all optional, render whatever is present):
         sku, from_linea, from_fecha, from_turno, to_linea, to_fecha, to_turno,
@@ -54,27 +54,59 @@ def describe_move(move: dict) -> str:
     return f"Mover {sku}  {from_str}  →  {to_str}  ·  {reason}"
 
 
-def weekly_summary(swap_log: list[dict], baseline_oee: float, optimized_oee: float) -> str:
-    """Aggregate week-level summary of all moves."""
+def describe_priority_insert(job, slot) -> str:
+    """`job` is a Job (is_priority=True), `slot` is the Slot it was placed in."""
+    reason = str(job.raw_row.get("priority_reason") or "OF prioritario")
+    return (
+        f"⭐ OF prioritario {job.sku} ({int(job.hl)} HL) insertado en "
+        f"L{slot.linea}/{slot.fecha.isoformat()}/{slot.turno} · "
+        f"deadline {job.deadline.isoformat()} · {reason}"
+    )
+
+
+def describe_eviction(victim_job, victim_slot, displaced_by_job) -> str:
+    """`victim_job` is the OF being evicted from `victim_slot`,
+    displaced by `displaced_by_job` (a priority Job)."""
+    return (
+        f"⚠️ OF {victim_job.sku} desplazado de "
+        f"L{victim_slot.linea}/{victim_slot.fecha.isoformat()}/{victim_slot.turno} "
+        f"por OF prioritario {displaced_by_job.sku} · pendiente de realojo"
+    )
+
+
+def weekly_summary(
+    swap_log: list[dict],
+    baseline_oee: float,
+    optimized_oee: float,
+    *,
+    n_outages: int = 0,
+    n_priority_placed: int = 0,
+    n_priority_failed: int = 0,
+    n_evictions: int = 0,
+) -> str:
+    """Aggregate week-level summary of all moves, with optional incident line."""
     delta_oee_pts = (optimized_oee - baseline_oee) * 100
+
+    # Count only optimization-type moves for changeover/format aggregates
+    opt_moves = [m for m in swap_log if m.get("move_type", "optimization") == "optimization"]
     total_changeover_saved = -sum(
-        m.get("delta_changeover_min", 0) for m in swap_log
+        m.get("delta_changeover_min", 0) for m in opt_moves
         if m.get("delta_changeover_min", 0) < 0
     )
     total_changeover_added = sum(
-        m.get("delta_changeover_min", 0) for m in swap_log
+        m.get("delta_changeover_min", 0) for m in opt_moves
         if m.get("delta_changeover_min", 0) > 0
     )
     net_changeover = total_changeover_added - total_changeover_saved
     n_maint_better = sum(
-        1 for m in swap_log if m.get("delta_maint_hours_close", 0) > 0
+        1 for m in opt_moves if m.get("delta_maint_hours_close", 0) > 0
     )
     n_format_grouped = sum(
-        1 for m in swap_log if m.get("same_format_neighbour")
+        1 for m in opt_moves if m.get("same_format_neighbour")
     )
 
     parts = [
-        f"**{len(swap_log)}** movimientos aplicados",
+        f"**{len(opt_moves)}** movimientos de optimización aplicados",
         f"**{delta_oee_pts:+.2f} pts** de OEE (HL-ponderada)",
     ]
     if net_changeover < 0:
@@ -86,4 +118,18 @@ def weekly_summary(swap_log: list[dict], baseline_oee: float, optimized_oee: flo
     if n_format_grouped > 0:
         parts.append(f"**{n_format_grouped}** OFs reagrupados por formato")
 
-    return "  ·  ".join(parts)
+    base_line = "  ·  ".join(parts)
+
+    incidencias_bits: list[str] = []
+    if n_outages:
+        incidencias_bits.append(f"**{n_outages}** outage(s) declarado(s)")
+    if n_priority_placed:
+        incidencias_bits.append(f"**{n_priority_placed}** OF(s) prioritario(s) insertado(s)")
+    if n_evictions:
+        incidencias_bits.append(f"**{n_evictions}** OF(s) desplazado(s)")
+    if n_priority_failed:
+        incidencias_bits.append(f"⚠️ **{n_priority_failed}** OF(s) prioritario(s) sin slot factible")
+
+    if incidencias_bits:
+        return base_line + "\n\n**Incidencias:** " + "  ·  ".join(incidencias_bits)
+    return base_line

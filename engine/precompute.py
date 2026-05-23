@@ -25,7 +25,7 @@ import pandas as pd
 
 from .build_features import build_feature_rows
 from .constraints import Job, Slot, can_place
-from .maintenance_blocker import blocked_slot_map
+from .maintenance_blocker import apply_outages, blocked_slot_map
 from .parse_planning_excel import LINE_FORMAT_COMPAT, infer_estado_volumen_from_sku
 from .predict_oee import predict_blocks
 
@@ -39,13 +39,24 @@ def build_jobs_and_slots(
     blocks: pd.DataFrame,
     lookups_dir: str | Path,
     extra_days_before_deadline: int = 0,
+    outages: list[dict] | None = None,
+    priority_ofs: list[dict] | None = None,
 ) -> tuple[list[Job], list[Slot], dict[str, Job], dict[str, Slot]]:
     """Translate a parsed-plan DataFrame into the (jobs, slots) data structures
-    the V2 solver consumes.
+    the V2/V3 solver consumes.
 
     The block's `fecha` is treated as the OF's hard DEADLINE (latest day it may
     finish). Slots are the cartesian product of (línea × día × turno) over
     [min(fecha), max(fecha)] from the upload, restricted to physical compat.
+
+    `outages`:      optional list of {linea, fecha, turno, reason?} dicts that
+                    mark (línea, fecha, turno) tuples as hard-blocked (treated
+                    identically to scheduled maintenance once merged).
+    `priority_ofs`: optional list of {sku, hl, deadline, preferred_linea?,
+                    reason?} dicts. Each becomes a synthetic Job with
+                    is_priority=True, deadline parsed from the dict, and
+                    feasible_lines derived from dim_sku format compat
+                    (intersected with preferred_linea if supplied).
     """
     feas = pd.read_parquet(Path(lookups_dir) / "sku_line_feasibility.parquet")
     feas_pairs = {(str(r.sku), int(r.linea)) for r in feas.itertuples()
@@ -63,7 +74,26 @@ def build_jobs_and_slots(
     # If a línea isn't in history, fall back to a permissive default
     default_capacity = max(cap_per_linea_day.values(), default=6)
 
-    # ----- jobs -----
+    def _feasible_lines_for_sku(sku: str, ev: str | None,
+                                preferred: int | None = None) -> set[int]:
+        feasible = set()
+        for ln in (14, 17, 19):
+            if (sku, ln) in feas_pairs and (ev is None or ev in LINE_FORMAT_COMPAT[ln]):
+                feasible.add(ln)
+        if not feasible and ev is not None:
+            for ln in (14, 17, 19):
+                if ev in LINE_FORMAT_COMPAT[ln]:
+                    feasible.add(ln)
+        if preferred is not None:
+            if preferred in feasible:
+                feasible = {preferred}
+            elif feasible:
+                # Preferred specified but incompatible → keep feasible, warn
+                # via the optimizer's logger (priority_audit catches it later).
+                pass
+        return feasible
+
+    # ----- jobs from the input plan -----
     jobs: list[Job] = []
     for idx, row in blocks.iterrows():
         sku = str(row["sku"])
@@ -72,18 +102,8 @@ def build_jobs_and_slots(
             ev = infer_estado_volumen_from_sku(sku)
         else:
             ev = str(ev_dim)
-        # feasible lines: must be in historical feasibility AND compatible with format
-        feasible = set()
-        for ln in (14, 17, 19):
-            if (sku, ln) in feas_pairs and (ev is None or ev in LINE_FORMAT_COMPAT[ln]):
-                feasible.add(ln)
-        # if no historical feasibility info, fall back to format-only
-        if not feasible and ev is not None:
-            for ln in (14, 17, 19):
-                if ev in LINE_FORMAT_COMPAT[ln]:
-                    feasible.add(ln)
+        feasible = _feasible_lines_for_sku(sku, ev)
         if not feasible:
-            # last resort: original assignment
             feasible = {int(row["linea"])}
         jobs.append(Job(
             job_id=str(row["block_id"]),
@@ -94,6 +114,61 @@ def build_jobs_and_slots(
             feasible_lines=feasible,
             original_block_id=str(row["block_id"]),
             raw_row=row.to_dict(),
+            is_priority=bool(row.get("_is_priority", False)),
+        ))
+
+    # ----- synthetic priority jobs (additive; not present in the input plan) -----
+    priority_ofs = list(priority_ofs or [])
+    for i, po in enumerate(priority_ofs):
+        try:
+            sku = str(po["sku"])
+            hl  = float(po["hl"])
+            deadline = pd.Timestamp(po["deadline"]).date()
+        except (KeyError, ValueError, TypeError) as exc:
+            raise ValueError(
+                f"Priority OF entry malformed (need sku/hl/deadline): {po!r} ({exc})"
+            ) from exc
+        preferred = po.get("preferred_linea")
+        if preferred is not None:
+            preferred = int(preferred)
+        ev_dim = sku_to_state.get(sku)
+        ev = str(ev_dim) if ev_dim is not None and not pd.isna(ev_dim) \
+             else infer_estado_volumen_from_sku(sku)
+        feasible = _feasible_lines_for_sku(sku, ev, preferred=preferred)
+        if not feasible:
+            # No línea can physically run this SKU — surface as priority violation
+            # via priority_audit (job has empty feasible set; can_place rejects all).
+            feasible = set()
+        synthetic_id = f"PRIO::{sku}::{deadline.isoformat()}::{i:02d}"
+        # raw_row mimics what parse_planning_excel would emit (one priority block)
+        raw_row = {
+            "block_id": synthetic_id,
+            "sku":       sku,
+            "linea":     (preferred or (sorted(feasible)[0] if feasible else 14)),
+            "fecha":     pd.Timestamp(deadline),
+            "turno":     "T",
+            "hl":        hl,
+            "cntd_plan": hl,
+            "cntd_jda":  hl,
+            "secuencia": 9000 + i,
+            "start_ts":  pd.Timestamp(deadline).replace(hour=8),
+            "source":    "priority_inject",
+            "feasible":  bool(feasible),
+            "has_history": (sku, sorted(feasible)[0]) in feas_pairs if feasible else False,
+            "feas_reason": None if feasible else "Priority OF: no feasible línea (format incompatible)",
+            "_is_priority": True,
+            "priority_reason": str(po.get("reason") or "OF prioritario"),
+        }
+        jobs.append(Job(
+            job_id=synthetic_id,
+            sku=sku,
+            hl=hl,
+            deadline=deadline,
+            estado_volumen=ev,
+            feasible_lines=feasible,
+            original_block_id=synthetic_id,
+            raw_row=raw_row,
+            is_priority=True,
         ))
 
     # ----- slots -----
@@ -103,10 +178,12 @@ def build_jobs_and_slots(
     latest   = max(j.deadline for j in jobs)
     days = [earliest + timedelta(days=i) for i in range((latest - earliest).days + 1 + extra_days_before_deadline)]
 
-    # Project the deterministic CF Prat maintenance schedule onto our planning
-    # window. Any (línea, fecha, turno) in this map gets capacity_blocks=0 +
-    # is_maintenance_blocked=True so `can_place()` will reject placement.
+    # CF Prat maintenance schedule projected onto the planning window. Any
+    # (línea, fecha, turno) in this map gets is_blocked=True and capacity_blocks=0
+    # so `can_place()` will reject placement.
     maint_map = blocked_slot_map(days, lookups_dir=lookups_dir)
+    # User-supplied broken-línea outages are merged in identically.
+    apply_outages(maint_map, outages)
 
     slots: list[Slot] = []
     for ln in (14, 17, 19):
@@ -118,9 +195,9 @@ def build_jobs_and_slots(
                     slot_id=f"L{ln}|{d.isoformat()}|{turno}",
                     linea=ln, fecha=d, turno=turno,
                     capacity_blocks=0 if blocked else max(cap, 4),
-                    is_maintenance_blocked=bool(blocked),
-                    maintenance_event=blocked.event_type if blocked else None,
-                    maintenance_reason=blocked.reason if blocked else None,
+                    is_blocked=bool(blocked),
+                    block_event=blocked.block_event if blocked else None,
+                    block_reason=blocked.reason if blocked else None,
                 ))
 
     jobs_by_id = {j.job_id: j for j in jobs}

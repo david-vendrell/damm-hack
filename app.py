@@ -11,6 +11,7 @@ Two actions:
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import gradio as gr
@@ -39,7 +40,12 @@ def _predict_pipeline(xlsx_file: str) -> tuple[pd.DataFrame, dict]:
     return preds, meta
 
 
-def _optimize_pipeline_v3(xlsx_file: str, objective: str) -> tuple[dict, dict]:
+def _optimize_pipeline_v3(
+    xlsx_file: str,
+    objective: str,
+    outages: list[dict] | None = None,
+    priority_ofs: list[dict] | None = None,
+) -> tuple[dict, dict]:
     blocks, meta = parse_planning_excel(xlsx_file, FEASIBILITY)
     if blocks.empty:
         return {}, meta
@@ -54,6 +60,8 @@ def _optimize_pipeline_v3(xlsx_file: str, objective: str) -> tuple[dict, dict]:
         time_budget_sec=240,   # was 75
         max_iter=30,
         top_k_prevs=10,        # was 20 — halves lookup size + precompute time
+        outages=outages,
+        priority_ofs=priority_ofs,
     )
     return result, meta
 
@@ -190,7 +198,7 @@ def _maintenance_per_day(per_day: list[dict]) -> dict[str, str]:
         f_iso = d["fecha"]
         f_date = pd.Timestamp(f_iso).date()
         events = sorted(
-            {f"L{b.linea} {b.event_type}" for b in blocks if b.fecha == f_date}
+            {f"L{b.linea} {b.block_event}" for b in blocks if b.fecha == f_date}
         )
         out[f_iso] = "🛠 " + " · ".join(events) if events else ""
     return out
@@ -198,22 +206,81 @@ def _maintenance_per_day(per_day: list[dict]) -> dict[str, str]:
 
 def _swap_log_v3_table(swap_log: list[dict]) -> pd.DataFrame:
     if not swap_log:
-        return pd.DataFrame(columns=["#", "SKU", "Desde", "Hacia", "ΔOEE pts",
+        return pd.DataFrame(columns=["#", "Tipo", "SKU", "Desde", "Hacia", "ΔOEE pts",
                                      "Δ cambio min", "Δ mant h", "Agrupa formato", "Descripción"])
+    type_label = {
+        "optimization":           "⚙️ Optimización",
+        "priority_insert":        "⭐ Prioritario",
+        "eviction":               "⚠️ Desplazado",
+        "displaced_reassignment": "↪️ Realojo",
+    }
+    def _fmt_loc(linea, fecha, turno):
+        if linea is None or fecha is None:
+            return "—"
+        return f"L{linea} / {fecha} / {turno}"
     rows = []
     for i, s in enumerate(swap_log, 1):
+        mt = s.get("move_type", "optimization")
         rows.append({
             "#":              i,
+            "Tipo":           type_label.get(mt, mt),
             "SKU":            s["sku"],
-            "Desde":          f"L{s['from_linea']} / {s['from_fecha']} / {s['from_turno']}",
-            "Hacia":          f"L{s['to_linea']} / {s['to_fecha']} / {s['to_turno']}",
+            "Desde":          _fmt_loc(s.get("from_linea"), s.get("from_fecha"), s.get("from_turno")),
+            "Hacia":          _fmt_loc(s.get("to_linea"), s.get("to_fecha"), s.get("to_turno")),
             "ΔOEE pts":       f"{s.get('delta_oee_pts', 0):+.2f}",
-            "Δ cambio min":   f"{s.get('delta_changeover_min', 0):+.0f}",
-            "Δ mant h":       f"{s.get('delta_maint_hours_close', 0):+.0f}",
+            "Δ cambio min":   f"{s.get('delta_changeover_min', 0):+.0f}" if s.get('delta_changeover_min') is not None else "—",
+            "Δ mant h":       f"{s.get('delta_maint_hours_close', 0):+.0f}" if s.get('delta_maint_hours_close') is not None else "—",
             "Agrupa formato": "Sí" if s.get("same_format_neighbour") else "",
             "Descripción":    s.get("description", ""),
         })
     return pd.DataFrame(rows)
+
+
+def _parse_json_param(raw: str | None, name: str) -> tuple[list[dict], str | None]:
+    """Parse an optional JSON-string param from the UI. Returns (list, error)."""
+    if raw is None:
+        return [], None
+    raw = raw.strip()
+    if not raw:
+        return [], None
+    try:
+        parsed = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        return [], f"`{name}` no es JSON válido: {exc.msg} (línea {exc.lineno}, col {exc.colno})"
+    if not isinstance(parsed, list):
+        return [], f"`{name}` debe ser una lista JSON (`[...]`), no {type(parsed).__name__}"
+    return parsed, None
+
+
+def _incidencias_section(incidencias: dict) -> str:
+    """Render the Incidencias summary as Markdown. Empty string if no incidents."""
+    if not incidencias:
+        return ""
+    out_list   = incidencias.get("outages_applied") or []
+    prio_req   = incidencias.get("priority_ofs_requested") or []
+    prio_done  = int(incidencias.get("priority_ofs_placed", 0) or 0)
+    prio_fail  = incidencias.get("priority_ofs_failed") or []
+    n_evict    = int(incidencias.get("evictions", 0) or 0)
+    if not (out_list or prio_req):
+        return ""
+    bits: list[str] = []
+    if out_list:
+        bits.append(f"- ⛔ **{len(out_list)} outage(s) declarado(s)**: " +
+                    ", ".join(f"L{o.get('linea')} {o.get('fecha')} {o.get('turno')}"
+                              for o in out_list[:6]) +
+                    ("…" if len(out_list) > 6 else ""))
+    if prio_req:
+        if prio_fail:
+            bits.append(
+                f"- ⭐ **{prio_done}/{len(prio_req)} OF(s) prioritario(s)** colocado(s) "
+                f"· ⚠️ {len(prio_fail)} sin slot factible: " +
+                ", ".join(f"{f.get('sku')} (deadline {f.get('deadline')})" for f in prio_fail[:4])
+            )
+        else:
+            bits.append(f"- ⭐ **{prio_done}/{len(prio_req)} OF(s) prioritario(s)** colocado(s)")
+    if n_evict:
+        bits.append(f"- ↪️ **{n_evict} OF(s) desplazado(s)** y reasignado(s) por inserción prioritaria")
+    return "\n#### ⚡ Incidencias gestionadas\n" + "\n".join(bits) + "\n"
 
 
 # ------------------------------------------------------------------ Gradio callbacks
@@ -306,17 +373,31 @@ def predict(file_obj):
     return (summary_md, _line_summary(preds), _block_table(preds), _top_drivers_table(preds))
 
 
-def optimize_v3(file_obj, aggressive: bool, progress=gr.Progress(track_tqdm=False)):
+def optimize_v3(
+    file_obj,
+    aggressive: bool,
+    outages_json: str = "",
+    priority_ofs_json: str = "",
+    progress=gr.Progress(track_tqdm=False),
+):
     empty = pd.DataFrame()
     if file_obj is None:
         return ("⚠️ Sube un fichero .xlsx primero.", empty, empty, empty)
     path = file_obj if isinstance(file_obj, str) else file_obj.name
     objective = "p90" if aggressive else "p50"
     obj_label = "p90 (perseguir techo)" if aggressive else "p50 (esperado)"
+
+    outages, err1 = _parse_json_param(outages_json, "outages")
+    if err1:
+        return (f"❌ {err1}", empty, empty, empty)
+    priority_ofs, err2 = _parse_json_param(priority_ofs_json, "priority_ofs")
+    if err2:
+        return (f"❌ {err2}", empty, empty, empty)
+
     progress(0.05, desc=f"Parseando Excel (modo {obj_label})…")
     try:
         progress(0.15, desc="Construyendo lookup prev-aware (~30s)…")
-        result, meta = _optimize_pipeline_v3(path, objective)
+        result, meta = _optimize_pipeline_v3(path, objective, outages, priority_ofs)
     except Exception as exc:
         return (f"❌ Error optimizando: {exc}", empty, empty, empty)
 
@@ -338,7 +419,7 @@ def optimize_v3(file_obj, aggressive: bool, progress=gr.Progress(track_tqdm=Fals
     # Maintenance summary: how many slots blocked & did the optimizer respect them?
     mant_per_day = _maintenance_per_day(per_day)
     n_mant_days  = sum(1 for v in mant_per_day.values() if v)
-    mant_violations = result["audit"].get("maintenance_violations", [])
+    mant_violations = result["audit"].get("block_violations") or result["audit"].get("maintenance_violations", [])
     mant_line = ""
     if n_mant_days:
         if mant_violations:
@@ -355,6 +436,7 @@ def optimize_v3(file_obj, aggressive: bool, progress=gr.Progress(track_tqdm=Fals
 
     progress(0.95, desc="Generando resumen…")
     status_emoji = "✅" if audit_ok else "⚠️"
+    incidencias_md = _incidencias_section(result.get("incidencias", {}))
 
     # Build per-línea diagnostic markdown (with Simpson's-paradox note)
     per_line_md_rows = []
@@ -380,10 +462,10 @@ def optimize_v3(file_obj, aggressive: bool, progress=gr.Progress(track_tqdm=Fals
 | **Ganancia**         | **{delta_pts:+.2f} puntos** |
 
 - **{n_changes}** reasignaciones aplicadas en **{elapsed:.1f} s**  {status_emoji}
-- **{total_hl:,} HL** totales planificados (sin cambio — volumen fijo)
+- **{total_hl:,} HL** totales planificados (incluye OF(s) prioritario(s) si los hay)
 - Modo: **{obj_label}**
 {mant_line}
-
+{incidencias_md}
 #### Detalle operacional
 {weekly}
 
@@ -459,6 +541,23 @@ with gr.Blocks(
                     "Desactivado: optimiza el OEE esperado p50."
                 ),
             )
+            with gr.Accordion("⚡ Incidencias (avanzado — opcional)", open=False):
+                gr.Markdown(
+                    "> Las **incidencias** modifican la optimización en caliente. "
+                    "Pega JSON aquí cuando una línea esté rota o haya un OF prioritario. "
+                    "Vacío = sin incidencias. El back-end de la planta puede llamar al "
+                    "endpoint directamente desde el front Next.js — ver `FRONTEND_API_CONTRACT.md`."
+                )
+                outages_in = gr.Textbox(
+                    label="Outages — JSON [{linea, fecha, turno, reason?}, …]",
+                    placeholder='[{"linea": 17, "fecha": "2026-05-26", "turno": "T", "reason": "Avería rodillo"}]',
+                    lines=3,
+                )
+                priority_ofs_in = gr.Textbox(
+                    label="OFs prioritarios — JSON [{sku, hl, deadline, preferred_linea?, reason?}, …]",
+                    placeholder='[{"sku": "ED13LTW", "hl": 250, "deadline": "2026-05-28", "reason": "Pedido urgente cliente X"}]',
+                    lines=3,
+                )
             gr.Markdown(
                 "> El sistema usa un modelo **LightGBM quantile** entrenado con "
                 "~2 200 OFs históricos de 2025. **`p90`** = techo de OEE razonablemente "
@@ -502,7 +601,7 @@ with gr.Blocks(
     )
     btn_optimize.click(
         fn=optimize_v3,
-        inputs=[file_in, aggressive],
+        inputs=[file_in, aggressive, outages_in, priority_ofs_in],
         outputs=[opt_summary, opt_day_tbl, opt_line_tbl, opt_swap_tbl],
     )
 

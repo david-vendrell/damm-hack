@@ -11,11 +11,23 @@ Plus: every applied move carries explicit operational metrics
     · Δ maintenance proximity hours
 so the planner sees WHY each move is good, not just the OEE number.
 
+V3.1 — Incidencias (`outages`, `priority_ofs`):
+    · `outages`      = list[{linea, fecha, turno, reason?}] — slots hard-blocked
+                       at runtime (broken línea / declared incident). Treated
+                       identically to scheduled maintenance.
+    · `priority_ofs` = list[{sku, hl, deadline, preferred_linea?, reason?}] —
+                       extra urgent OFs that MUST be placed before their deadline.
+                       Pre-placement evicts the lowest-(p50×HL) existing OF from
+                       the chosen slot if at capacity (single-level eviction;
+                       displaced OF is reassigned by the standard local search).
+
 Public API:
     optimize_plan_v3(blocks, lookups_dir, models_dir,
                      objective='p50'|'p90',
                      time_budget_sec=90,
-                     top_k_prevs=20)
+                     top_k_prevs=20,
+                     outages=None,
+                     priority_ofs=None)
 """
 
 from __future__ import annotations
@@ -29,7 +41,12 @@ import pandas as pd
 
 from .build_features import build_feature_rows
 from .constraints import Job, Slot, can_place, full_audit
-from .explainer import describe_move, weekly_summary
+from .explainer import (
+    describe_eviction,
+    describe_move,
+    describe_priority_insert,
+    weekly_summary,
+)
 from .precompute_v3 import build_prev_aware_lookup
 from .precompute import build_jobs_and_slots
 from .predict_oee import predict_blocks
@@ -46,8 +63,10 @@ def optimize_plan_v3(
     time_budget_sec: float = 90.0,
     max_iter: int = 60,
     top_k_prevs: int = 20,
+    outages: list[dict] | None = None,
+    priority_ofs: list[dict] | None = None,
 ) -> dict[str, Any]:
-    """V3 cascade-aware optimizer with operational reasoning."""
+    """V3 cascade-aware optimizer with operational reasoning + incidencias."""
     t0 = time.time()
 
     if blocks.empty:
@@ -58,16 +77,25 @@ def optimize_plan_v3(
         blocks["start_ts"] = pd.to_datetime(blocks["fecha"])
     blocks["start_ts"] = pd.to_datetime(blocks["start_ts"])
     blocks = blocks.sort_values(["linea", "start_ts", "secuencia"], na_position="last").reset_index(drop=True)
+    # Tag baseline rows so the augmented frame can distinguish them from
+    # priority-injected rows added later (used by hl_invariance_ok).
+    if "_is_priority" not in blocks.columns:
+        blocks["_is_priority"] = False
 
-    jobs, slots, jobs_by_id, slots_by_id = build_jobs_and_slots(blocks, lookups_dir)
+    jobs, slots, jobs_by_id, slots_by_id = build_jobs_and_slots(
+        blocks, lookups_dir, outages=outages, priority_ofs=priority_ofs,
+    )
     if not jobs or not slots:
         return _empty_result()
 
-    # ----- baseline score
+    priority_jobs = [j for j in jobs if j.is_priority]
+    base_jobs     = [j for j in jobs if not j.is_priority]
+
+    # ----- baseline score (input plan only — priority OFs not counted in baseline)
     base_preds = _score_full(blocks, lookups_dir, models_dir)
     baseline_score = _hl_weighted(base_preds, blocks, objective)
 
-    # ----- precompute prev-aware lookup
+    # ----- precompute prev-aware lookup (over ALL jobs including priority)
     print(f"   precomputing prev-aware lookup (top_k_prevs={top_k_prevs})...")
     lookup, prev_pool = build_prev_aware_lookup(
         jobs, slots, blocks, lookups_dir, models_dir, top_k_prevs=top_k_prevs,
@@ -82,34 +110,125 @@ def optimize_plan_v3(
         (int(r.linea), str(r.from_state), str(r.to_state)): int(r.minutes)
         for r in matrix_df.itertuples()
     }
-    # Maintenance schedule per línea (approximate from historical LIMPIEZA cadence)
     maint = pd.read_parquet(Path(lookups_dir) / "maintenance_proxy.parquet")
     avg_days_between_maint = {
         int(r.linea): float(r.expected_days_between_limpiezas)
         for r in maint.itertuples()
     }
 
-    # ----- baseline assignment (start from planner's original)
-    assignment: dict[str, str] = {}
+    # ----- baseline assignment (start from planner's original; priority OFs unassigned)
+    assignment: dict[str, str | None] = {}
     for _, row in blocks.iterrows():
         sid = _slot_id_from_row(row, slots_by_id)
         if sid is None:
             sid = next(iter(slots_by_id))
         assignment[str(row["block_id"])] = sid
+    for j in priority_jobs:
+        assignment[j.job_id] = None    # placed by pre-placement phase below
 
-    # We also track per-slot ordered list of jobs (sequence within slot) for prev_sku
-    slot_to_jobs: dict[str, list[str]] = {}
-    for jid, sid in assignment.items():
-        slot_to_jobs.setdefault(sid, []).append(jid)
-    for sid in slot_to_jobs:
-        # Order by original secuencia / start_ts (already sorted)
-        order = blocks.set_index("block_id").loc[slot_to_jobs[sid]].reset_index()
-        order = order.sort_values(["start_ts", "secuencia"], na_position="last")
-        slot_to_jobs[sid] = order["block_id"].astype(str).tolist()
+    pinned: set[str]   = set()
+    displaced: set[str] = set()      # baseline jobs ejected by priority insert
+    swap_log: list[dict] = []
+    incidencias: dict[str, Any] = {
+        "outages_applied":          list(outages or []),
+        "priority_ofs_requested":   list(priority_ofs or []),
+        "priority_ofs_placed":      0,
+        "priority_ofs_failed":      [],
+        "evictions":                0,
+    }
 
-    # ----- helper: what prev_sku does job j see in current assignment?
+    # ============================================================
+    # PHASE 2 — Pre-place priority OFs (hard insert + single-level eviction)
+    # ============================================================
+    if priority_jobs:
+        # Process by deadline asc, then hl desc — tightest constraint first
+        order = sorted(priority_jobs, key=lambda j: (j.deadline, -j.hl))
+        for pj in order:
+            best_sid, evicted_jid = _place_priority_job(
+                pj, slots, jobs_by_id, assignment, lookup, objective,
+            )
+            if best_sid is None:
+                incidencias["priority_ofs_failed"].append({
+                    "sku":      pj.sku,
+                    "hl":       pj.hl,
+                    "deadline": pj.deadline.isoformat(),
+                    "reason":   "no_feasible_slot",
+                })
+                continue
+            # Apply placement
+            if evicted_jid is not None:
+                # Single-level eviction: displaced OF goes into the pool;
+                # local search will find it a new slot.
+                assignment[evicted_jid] = None
+                displaced.add(evicted_jid)
+                incidencias["evictions"] += 1
+                victim = jobs_by_id[evicted_jid]
+                victim_slot = slots_by_id[best_sid]
+                swap_log.append({
+                    "iteration":     0,
+                    "move_type":     "eviction",
+                    "block_id":      evicted_jid,
+                    "sku":           str(victim.sku),
+                    "from_linea":    victim_slot.linea,
+                    "from_fecha":    victim_slot.fecha.isoformat(),
+                    "from_turno":    victim_slot.turno,
+                    "to_linea":      None,
+                    "to_fecha":      None,
+                    "to_turno":      None,
+                    "delta_oee_pts": 0.0,
+                    "displaced_by":  pj.job_id,
+                    "displaced_by_sku": pj.sku,
+                    "description":   describe_eviction(victim, victim_slot, pj),
+                })
+            assignment[pj.job_id] = best_sid
+            pinned.add(pj.job_id)
+            incidencias["priority_ofs_placed"] += 1
+            target_slot = slots_by_id[best_sid]
+            swap_log.append({
+                "iteration":     0,
+                "move_type":     "priority_insert",
+                "block_id":      pj.job_id,
+                "sku":           str(pj.sku),
+                "from_linea":    None,
+                "from_fecha":    None,
+                "from_turno":    None,
+                "to_linea":      target_slot.linea,
+                "to_fecha":      target_slot.fecha.isoformat(),
+                "to_turno":      target_slot.turno,
+                "delta_oee_pts": 0.0,
+                "priority_reason": str(pj.raw_row.get("priority_reason") or ""),
+                "description":   describe_priority_insert(pj, target_slot),
+            })
+
+    # ============================================================
+    # Rebuild slot_to_jobs from current assignment for downstream helpers
+    # ============================================================
+    def _rebuild_slot_chains() -> dict[str, list[str]]:
+        chains: dict[str, list[str]] = {}
+        for jid, sid in assignment.items():
+            if sid is None:
+                continue
+            chains.setdefault(sid, []).append(jid)
+        # Order each chain: baseline rows by start_ts, priority OFs appended last
+        # (priority OFs have synthetic secuencia 9000+ already).
+        order_index = {str(r["block_id"]): (pd.Timestamp(r["start_ts"]),
+                                            int(r.get("secuencia", 0) or 0))
+                       for _, r in blocks.iterrows()}
+        for sid, chain in chains.items():
+            def _k(jid):
+                if jid in order_index:
+                    return order_index[jid]
+                # priority — sort last
+                return (pd.Timestamp.max, jobs_by_id[jid].deadline.toordinal() + 9000)
+            chains[sid] = sorted(chain, key=_k)
+        return chains
+
+    slot_to_jobs = _rebuild_slot_chains()
+
     def prev_sku_of(jid: str) -> str | None:
-        sid = assignment[jid]
+        sid = assignment.get(jid)
+        if sid is None:
+            return None
         chain = slot_to_jobs.get(sid, [])
         if not chain:
             return None
@@ -118,39 +237,67 @@ def optimize_plan_v3(
             return None
         return str(jobs_by_id[chain[idx - 1]].sku)
 
-    # ----- helper: score a job given its current slot+prev (uses lookup with fallback)
     def lookup_score(jid: str, sid: str, prev_sku: str | None) -> float:
         key = (jid, sid, prev_sku)
         v = lookup.get(key)
         if v is None:
-            # Fall back to no-prev entry if prev_sku not in pool
             v = lookup.get((jid, sid, None))
         return float(v[objective]) if v is not None else float("-inf")
 
-    # ----- helper: compute current full score using lookup (cascade-aware)
-    def full_score() -> float:
-        tot_hl, tot_w = 0.0, 0.0
-        for jid in assignment:
-            j = jobs_by_id[jid]
-            sid = assignment[jid]
-            prev = prev_sku_of(jid)
-            s = lookup_score(jid, sid, prev)
-            if s == float("-inf"):
+    # ============================================================
+    # PHASE 2.5 — Re-place displaced OFs (highest priority in local search)
+    # ============================================================
+    for jid in list(displaced):
+        j = jobs_by_id[jid]
+        best_s = None
+        best_score = float("-inf")
+        for s in slots:
+            if not can_place(j, s):
                 continue
-            tot_w += s * j.hl
-            tot_hl += j.hl
-        return tot_w / tot_hl if tot_hl > 0 else 0.0
+            current = slot_to_jobs.get(s.slot_id, [])
+            if len(current) >= s.capacity_blocks:
+                continue
+            new_prev = str(jobs_by_id[current[-1]].sku) if current else None
+            score = lookup_score(jid, s.slot_id, new_prev)
+            if score > best_score:
+                best_score = score
+                best_s = s
+        if best_s is None:
+            # Could not re-place the evicted OF — leave unassigned; priority_audit
+            # will surface the issue. We DO NOT roll back the priority insert.
+            incidencias.setdefault("displaced_unplaceable", []).append({
+                "block_id": jid, "sku": str(j.sku),
+                "reason": "no feasible slot with spare capacity after eviction",
+            })
+            continue
+        assignment[jid] = best_s.slot_id
+        slot_to_jobs.setdefault(best_s.slot_id, []).append(jid)
+        displaced.discard(jid)
+        new_slot = slots_by_id[best_s.slot_id]
+        swap_log.append({
+            "iteration":     0,
+            "move_type":     "displaced_reassignment",
+            "block_id":      jid,
+            "sku":           str(j.sku),
+            "from_linea":    None,
+            "from_fecha":    None,
+            "from_turno":    None,
+            "to_linea":      new_slot.linea,
+            "to_fecha":      new_slot.fecha.isoformat(),
+            "to_turno":      new_slot.turno,
+            "delta_oee_pts": 0.0,
+            "description":   f"OF {j.sku} desplazado por OF prioritario · "
+                             f"realojado en L{new_slot.linea}/{new_slot.fecha.isoformat()}/{new_slot.turno}",
+        })
 
-    current_score = full_score()
+    slot_to_jobs = _rebuild_slot_chains()
 
     # ============================================================
-    # Lookup-driven local search (prev-aware lookup proposes; full re-score validates)
+    # PHASE 3 — Lookup-driven local search (skips pinned priority OFs)
     # ============================================================
-    swap_log: list[dict] = []
     tabu: set[tuple[str, str]] = set()
-    MIN_IMPROVEMENT = 1e-4   # 0.01 OEE pts in fraction (more sensitive than V2's 1e-3)
+    MIN_IMPROVEMENT = 1e-4
 
-    # Initial full-rescore baseline (uses real model predictions, not lookup)
     cur_full_blocks = _materialise_blocks(blocks, assignment, jobs_by_id, slots_by_id)
     cur_full_preds  = _score_full(cur_full_blocks, lookups_dir, models_dir)
     current_score   = _hl_weighted(cur_full_preds, cur_full_blocks, objective)
@@ -159,15 +306,17 @@ def optimize_plan_v3(
         if time.time() - t0 > time_budget_sec:
             break
 
-        # Find the candidate with the highest SELF-DELTA in the prev-aware lookup
         best_lookup_delta = MIN_IMPROVEMENT
         best_move = None
         for j in jobs:
             jid = j.job_id
-            cur_sid = assignment[jid]
+            if jid in pinned:
+                continue
+            cur_sid = assignment.get(jid)
+            if cur_sid is None:
+                continue
             cur_prev = prev_sku_of(jid)
             cur_score_self = lookup_score(jid, cur_sid, cur_prev)
-            # Skip jobs whose current slot isn't in the lookup (shouldn't happen often)
             if cur_score_self == float("-inf"):
                 cur_score_self = 0.0
 
@@ -186,7 +335,6 @@ def optimize_plan_v3(
                 new_score_self = lookup_score(jid, s.slot_id, new_prev)
                 if new_score_self == float("-inf"):
                     continue
-                # HL-weighted self-delta (single block)
                 total_hl = sum(jj.hl for jj in jobs)
                 delta = (new_score_self - cur_score_self) * j.hl / max(total_hl, 1.0)
                 if delta > best_lookup_delta:
@@ -196,20 +344,17 @@ def optimize_plan_v3(
         if best_move is None:
             break
 
-        # Apply tentatively
         jid, from_sid, to_sid, new_prev, old_prev = best_move
         slot_to_jobs[from_sid].remove(jid)
         slot_to_jobs.setdefault(to_sid, []).append(jid)
         assignment[jid] = to_sid
 
-        # Validate with full re-score (catches cascades the lookup missed)
         cand_blocks = _materialise_blocks(blocks, assignment, jobs_by_id, slots_by_id)
         cand_preds  = _score_full(cand_blocks, lookups_dir, models_dir)
         new_score   = _hl_weighted(cand_preds, cand_blocks, objective)
         actual_delta = new_score - current_score
 
         if actual_delta <= MIN_IMPROVEMENT:
-            # Revert
             slot_to_jobs[to_sid].remove(jid)
             slot_to_jobs[from_sid].append(jid)
             assignment[jid] = from_sid
@@ -219,7 +364,6 @@ def optimize_plan_v3(
         tabu.add((jid, from_sid))
         current_score = new_score
 
-        # Compute operational metrics for the move
         j_obj = jobs_by_id[jid]
         op_metrics = _compute_operational_metrics(
             j_obj, jobs_by_id, slots_by_id,
@@ -229,6 +373,7 @@ def optimize_plan_v3(
 
         move_record = {
             "iteration":       iteration + 1,
+            "move_type":       "optimization",
             "block_id":        jid,
             "sku":             str(j_obj.sku),
             "from_linea":      slots_by_id[from_sid].linea,
@@ -247,16 +392,24 @@ def optimize_plan_v3(
     # ============================================================
     # Materialise final plan + audit
     # ============================================================
-    best_blocks = _materialise_blocks(blocks, assignment, jobs_by_id, slots_by_id)
+    # Drop any priority OFs that ended up unassigned from the assignment
+    final_assignment = {jid: sid for jid, sid in assignment.items() if sid is not None}
+    best_blocks = _materialise_blocks(blocks, final_assignment, jobs_by_id, slots_by_id)
     best_preds = _score_full(best_blocks, lookups_dir, models_dir)
     final_score = _hl_weighted(best_preds, best_blocks, objective)
 
-    audit = full_audit(blocks, best_blocks, assignment, jobs_by_id, slots_by_id)
+    audit = full_audit(blocks, best_blocks, final_assignment, jobs_by_id, slots_by_id)
     per_line = _per_line_breakdown(blocks, base_preds, best_blocks, best_preds, objective)
     per_day  = _per_day_factory_breakdown(blocks, base_preds, best_blocks, best_preds, objective)
-    total_hl = float(blocks["hl"].sum())
+    total_hl = float(best_blocks["hl"].sum())
 
-    summary = weekly_summary(swap_log, baseline_score, final_score)
+    summary = weekly_summary(
+        swap_log, baseline_score, final_score,
+        n_outages=len(outages or []),
+        n_priority_placed=incidencias["priority_ofs_placed"],
+        n_priority_failed=len(incidencias["priority_ofs_failed"]),
+        n_evictions=incidencias["evictions"],
+    )
 
     return {
         "objective":          objective,
@@ -277,7 +430,76 @@ def optimize_plan_v3(
         "lookup_size":        len(lookup),
         "weekly_summary":     summary,
         "prev_pool_per_linea": {str(k): v for k, v in prev_pool.items()},
+        "incidencias":        incidencias,
     }
+
+
+# ============================================================
+# Priority OF placement (single-level eviction)
+# ============================================================
+def _place_priority_job(
+    pj: Job,
+    slots: list[Slot],
+    jobs_by_id: dict[str, Job],
+    assignment: dict[str, str | None],
+    lookup: dict,
+    objective: str,
+) -> tuple[str | None, str | None]:
+    """Choose the best feasible slot for a priority OF.
+
+    Returns `(slot_id, evicted_job_id)`. If `slot_id` is None, the OF cannot be
+    placed (no feasible slot before deadline). If `evicted_job_id` is None, the
+    slot had spare capacity; otherwise the named job must be displaced.
+
+    Strategy:
+        1. Enumerate every (línea × día × turno) slot satisfying can_place(pj, s)
+           and s.fecha <= pj.deadline.
+        2. Rank by intrinsic OEE p50 from the prev-blind lookup (prev=None) —
+           the cheapest signal that orders the candidates well enough.
+        3. Among feasible slots, prefer ones with spare capacity. If none has
+           capacity, evict from the highest-scoring at-capacity slot.
+        4. Eviction target = min(p50 × hl) of the existing OFs in that slot,
+           tie-broken by job_id lexicographic.
+    """
+    candidates: list[tuple[float, Slot]] = []
+    for s in slots:
+        if not can_place(pj, s):
+            continue
+        if s.fecha > pj.deadline:
+            continue
+        v = lookup.get((pj.job_id, s.slot_id, None))
+        score = float(v[objective]) if v is not None else 0.0
+        candidates.append((score, s))
+    if not candidates:
+        return None, None
+    candidates.sort(key=lambda t: (-t[0], t[1].slot_id))
+
+    # Recompute current per-slot counts
+    slot_counts: dict[str, int] = {}
+    for sid in assignment.values():
+        if sid is None:
+            continue
+        slot_counts[sid] = slot_counts.get(sid, 0) + 1
+
+    # First pass: any slot with spare capacity?
+    for _, s in candidates:
+        if slot_counts.get(s.slot_id, 0) < s.capacity_blocks:
+            return s.slot_id, None
+
+    # Second pass: evict from the highest-scoring candidate slot
+    target_score, target_slot = candidates[0]
+    occupants = [jid for jid, sid in assignment.items() if sid == target_slot.slot_id]
+    # Pick lowest-(score × hl) occupant; skip pinned ones (already-priority)
+    occupants = [jid for jid in occupants if not jobs_by_id[jid].is_priority]
+    if not occupants:
+        return target_slot.slot_id, None
+    def _victim_key(jid: str) -> tuple[float, str]:
+        j = jobs_by_id[jid]
+        v = lookup.get((jid, target_slot.slot_id, None))
+        s50 = float(v[objective]) if v is not None else 0.0
+        return (s50 * max(j.hl, 0.0), jid)   # lower = worse to keep
+    victim = min(occupants, key=_victim_key)
+    return target_slot.slot_id, victim
 
 
 # ============================================================
@@ -293,8 +515,6 @@ def _compute_operational_metrics(
     from_slot = slots_by_id[from_sid]
     to_slot   = slots_by_id[to_sid]
 
-    # Δ changeover minutes = teorico_at_old_position - teorico_at_new_position
-    # Position cost = changeover INTO this position (from old_prev → job vs new_prev → job)
     def teo_cost(prev_sku: str | None, linea: int) -> int:
         if prev_sku is None:
             return 0
@@ -306,15 +526,12 @@ def _compute_operational_metrics(
 
     old_co = teo_cost(old_prev, from_slot.linea)
     new_co = teo_cost(new_prev, to_slot.linea)
-    delta_changeover = new_co - old_co   # negative = saved
+    delta_changeover = new_co - old_co
 
-    # Δ maintenance proximity (positive = farther = better)
     cadence_old = avg_days_between_maint.get(from_slot.linea, 14.0)
     cadence_new = avg_days_between_maint.get(to_slot.linea, 14.0)
-    # Crude proxy: smaller cadence = more frequent maintenance = closer
     delta_maint_hours = (cadence_new - cadence_old) * 24
 
-    # Same-format neighbour?
     new_neighbour_ev = _estado_volumen_for_sku(new_prev, jobs_by_id) if new_prev else None
     same_format = (new_neighbour_ev == job.estado_volumen) if (new_neighbour_ev and job.estado_volumen) else False
 
@@ -369,9 +586,17 @@ def _hl_weighted(preds, blocks, objective):
 
 
 def _materialise_blocks(blocks, assignment, jobs_by_id, slots_by_id):
+    """Build the full blocks DataFrame reflecting current assignment.
+
+    Baseline rows come from `blocks` (slot fields updated to reflect assignment).
+    Priority OFs are NOT in `blocks` — they're synthesised here from each
+    priority job's raw_row, then placed at their assigned slot.
+    """
     out = blocks.copy()
+    # Update baseline rows
     for idx, row in out.iterrows():
-        sid = assignment.get(str(row["block_id"]))
+        jid = str(row["block_id"])
+        sid = assignment.get(jid)
         if sid is None:
             continue
         slot = slots_by_id[sid]
@@ -380,6 +605,35 @@ def _materialise_blocks(blocks, assignment, jobs_by_id, slots_by_id):
         out.at[idx, "turno"]    = slot.turno
         out.at[idx, "start_ts"] = pd.Timestamp(slot.fecha).replace(
             hour={"T": 8, "N": 16, "M": 0}.get(slot.turno, 8))
+
+    # Append priority OF rows (if any have a slot assigned)
+    priority_rows = []
+    for jid, job in jobs_by_id.items():
+        if not job.is_priority:
+            continue
+        sid = assignment.get(jid)
+        if sid is None:
+            continue
+        slot = slots_by_id[sid]
+        rr = dict(job.raw_row)
+        rr["linea"]       = int(slot.linea)
+        rr["fecha"]       = pd.Timestamp(slot.fecha)
+        rr["turno"]       = slot.turno
+        rr["start_ts"]    = pd.Timestamp(slot.fecha).replace(
+            hour={"T": 8, "N": 16, "M": 0}.get(slot.turno, 8))
+        rr["_is_priority"] = True
+        priority_rows.append(rr)
+    if priority_rows:
+        pri_df = pd.DataFrame(priority_rows)
+        # Align columns to baseline (add missing ones as NaN)
+        for c in out.columns:
+            if c not in pri_df.columns:
+                pri_df[c] = pd.NA
+        for c in pri_df.columns:
+            if c not in out.columns:
+                out[c] = pd.NA
+        out = pd.concat([out, pri_df[out.columns]], ignore_index=True)
+
     if "__pos" in out.columns:
         out = out.drop(columns="__pos")
     out = out.sort_values(["linea", "start_ts", "secuencia"], na_position="last").reset_index(drop=True)
@@ -408,13 +662,7 @@ def _per_line_breakdown(blocks_base, preds_base, blocks_opt, preds_opt, objectiv
 
 
 def _per_day_factory_breakdown(blocks_base, preds_base, blocks_opt, preds_opt, objective):
-    """Factory-wide (all 3 lines combined) HL-weighted OEE per día.
-
-    This is the operationally meaningful breakdown: each día shows the OEE
-    the factory will produce that day combining whatever blocks landed on
-    L14 + L17 + L19. Avoids the Simpson's-paradox confusion of per-línea
-    averages by keeping the weighting at factory scope.
-    """
+    """Factory-wide (all 3 lines combined) HL-weighted OEE per día."""
     base_join = preds_base[["block_id", objective]].merge(
         blocks_base[["block_id", "fecha", "hl"]], on="block_id")
     opt_join = preds_opt[["block_id", objective]].merge(
@@ -451,6 +699,9 @@ def _empty_result():
         "swap_log": [], "per_line": {}, "per_day": [], "total_hl": 0.0,
         "elapsed_sec": 0.0,
         "truncated": False, "audit": {"all_ok": True}, "weekly_summary": "",
+        "incidencias": {"outages_applied": [], "priority_ofs_requested": [],
+                        "priority_ofs_placed": 0, "priority_ofs_failed": [],
+                        "evictions": 0},
     }
 
 
@@ -485,4 +736,5 @@ def optimizer_v3_result_to_json(result):
         "optimized_blocks":          _df(result["best_blocks"]),
         "optimized_predictions":     _df(result["best_preds"]),
         "lookup_size":               int(result.get("lookup_size", 0)),
+        "incidencias":               result.get("incidencias", {}),
     }

@@ -38,7 +38,37 @@ PLANS = [
     "05_infactible_sin_historico.xlsx",
     "06_techo_optimo.xlsx",
     "07_conflicto_mantenimiento.xlsx",
+    "08_outage_basico.xlsx",
+    "09_priority_holgado.xlsx",
+    "10_priority_evict.xlsx",
 ]
+
+# Per-plan incident config — only the 08+ plans declare anything.
+# Keys: outages = list[{linea, fecha, turno, reason?}]
+#       priority_ofs = list[{sku, hl, deadline, preferred_linea?, reason?}]
+INCIDENTS: dict[str, dict] = {
+    "08_outage_basico.xlsx": {
+        "outages": [
+            {"linea": 17, "fecha": "2026-05-27", "turno": "T",
+             "reason": "Avería rodillo declarada por mantenimiento"},
+        ],
+        "priority_ofs": [],
+    },
+    "09_priority_holgado.xlsx": {
+        "outages": [],
+        "priority_ofs": [
+            {"sku": "ED13LTW", "hl": 250, "deadline": "2026-05-27",
+             "preferred_linea": 17, "reason": "Pedido urgente cliente X"},
+        ],
+    },
+    "10_priority_evict.xlsx": {
+        "outages": [],
+        "priority_ofs": [
+            {"sku": "ED13LTW", "hl": 800, "deadline": "2026-05-26",
+             "preferred_linea": 17, "reason": "Pedido urgente que requiere desplazamiento"},
+        ],
+    },
+}
 
 
 def _hl_weighted(preds: pd.DataFrame, col: str) -> float:
@@ -93,10 +123,17 @@ def run_one(name: str) -> dict:
               f"(producto={decomp['disp_p50']*decomp['rend_p50']*decomp['cal_p50']*100:.2f}%)")
     print(f"  total HL planificados: {total_hl:,}")
 
-    # --- optimize p90 aggressive
+    # --- optimize p90 aggressive (with optional incidents)
+    incidents = INCIDENTS.get(name, {})
+    outages      = incidents.get("outages") or None
+    priority_ofs = incidents.get("priority_ofs") or None
+    if outages or priority_ofs:
+        print(f"  ⚡ incidencias: {len(outages or [])} outage(s), "
+              f"{len(priority_ofs or [])} OF(s) prioritario(s)")
     result = optimize_plan_v3(
         blocks, str(LOOKUPS), str(MODELS),
         objective="p90", time_budget_sec=240, max_iter=30, top_k_prevs=10,
+        outages=outages, priority_ofs=priority_ofs,
     )
     opt_p90 = result["optimized_score"]
     delta   = result["delta_oee_pts"]
@@ -104,20 +141,43 @@ def run_one(name: str) -> dict:
     elapsed = result["elapsed_sec"]
     print(f"  optimized p90:    {opt_p90*100:5.2f}%   (+{delta:.2f} pts, {n_moves} moves, {elapsed}s)")
 
+    inc_info = result.get("incidencias", {}) or {}
+    if inc_info.get("priority_ofs_placed", 0) or inc_info.get("evictions", 0):
+        print(f"  incidencias resueltas: "
+              f"{inc_info.get('priority_ofs_placed', 0)} priority placed · "
+              f"{inc_info.get('evictions', 0)} OF(s) desplazado(s) · "
+              f"{len(inc_info.get('priority_ofs_failed', []))} priority fail(s)")
+    # Check audit for block_violations on outage slots
+    audit = result.get("audit", {}) or {}
+    blk_violations = audit.get("block_violations", [])
+    prio_violations = audit.get("priority_violations", [])
+    # Split by block_event type — OUTAGE means caller-declared incident violated
+    outage_violations = [b for b in blk_violations if (b[2] or "").upper() == "OUTAGE"]
+    if blk_violations:
+        print(f"  ⚠️ block_violations: {len(blk_violations)} total · "
+              f"{len(outage_violations)} OUTAGE-specific")
+    if prio_violations:
+        print(f"  ⚠️ priority_violations: {len(prio_violations)}")
+
     return {
-        "name":           name,
-        "source":         meta["source"],
-        "n_blocks":       meta["n_blocks"],
-        "n_infeasible":   meta["n_infeasible"],
-        "n_low_conf":     meta["n_low_confidence"],
-        "total_hl":       total_hl,
-        "decomp":         decomp,
-        "factory_p50":    fac_p50,
-        "factory_p90":    fac_p90,
-        "optimized_p90":  opt_p90,
-        "delta_pts":      delta,
-        "n_moves":        n_moves,
-        "elapsed_sec":    elapsed,
+        "name":             name,
+        "source":           meta["source"],
+        "n_blocks":         meta["n_blocks"],
+        "n_infeasible":     meta["n_infeasible"],
+        "n_low_conf":       meta["n_low_confidence"],
+        "total_hl":         total_hl,
+        "decomp":           decomp,
+        "factory_p50":      fac_p50,
+        "factory_p90":      fac_p90,
+        "optimized_p90":    opt_p90,
+        "delta_pts":        delta,
+        "n_moves":          n_moves,
+        "elapsed_sec":      elapsed,
+        "incidencias":      inc_info,
+        "block_violations": len(blk_violations),
+        "outage_violations": len(outage_violations),
+        "prio_violations":  len(prio_violations),
+        "best_blocks":      result.get("best_blocks"),
     }
 
 
@@ -160,6 +220,9 @@ def write_report(rows: list[dict]) -> None:
     r05 = _f("05_infactible_sin_historico.xlsx")
     r06 = _f("06_techo_optimo.xlsx")
     r07 = _f("07_conflicto_mantenimiento.xlsx")
+    r08 = _f("08_outage_basico.xlsx")
+    r09 = _f("09_priority_holgado.xlsx")
+    r10 = _f("10_priority_evict.xlsx")
 
     def _yn(passed: bool) -> str:
         return "✅ PASS" if passed else "❌ FAIL"
@@ -186,6 +249,21 @@ def write_report(rows: list[dict]) -> None:
 
     # Maintenance: 07 adds 3 deliberate conflict OFs vs baseline → strictly more infeasibles
     mant_ok = r07 and r07["n_infeasible"] > r01["n_infeasible"]
+
+    # Incidencias: 08 = outage declared, expect 0 OUTAGE-type block_violations.
+    # (Pre-existing LIMPIEZA/MANTENIMIENTO violations are noise from the baseline
+    # plan and are counted separately as `block_violations`.)
+    outage_ok = r08 and r08["outage_violations"] == 0
+
+    # Incidencias: 09 = priority OF must be placed AND no priority violations
+    prio_holg_ok = (r09
+                    and r09["incidencias"].get("priority_ofs_placed", 0) == 1
+                    and r09["prio_violations"] == 0)
+
+    # Incidencias: 10 = priority placed; eviction count >= 1 (capacity-driven displacement)
+    prio_evict_ok = (r10
+                     and r10["incidencias"].get("priority_ofs_placed", 0) == 1
+                     and r10["prio_violations"] == 0)
 
     lines += [
         "",
@@ -217,6 +295,20 @@ def write_report(rows: list[dict]) -> None:
         f"históricos vs 26-35 en L14/L19). Esto es **comportamiento esperado**: "
         f"incluso un plan sin chaos de formato tiene headroom de "
         f"`per-(SKU,línea) historical fit`.",
+        f"- **08** (`outage_basico` declara outage L17 Wed T, optimizador respeta): "
+        f"{_yn(outage_ok)}  — {r08['outage_violations'] if r08 else '?'} OUTAGE violations "
+        f"(0 esperado) · {r08['block_violations'] if r08 else '?'} block_violations totales "
+        f"(LIMPIEZA/MANT pre-existentes en el baseline). El optimizador respeta el slot OUTAGE.",
+        f"- **09** (`priority_holgado` inserta OF prioritario sin desplazar): "
+        f"{_yn(prio_holg_ok)}  — placed="
+        f"{r09['incidencias'].get('priority_ofs_placed', 0) if r09 else '?'}, "
+        f"evictions={r09['incidencias'].get('evictions', 0) if r09 else '?'}, "
+        f"priority_violations={r09['prio_violations'] if r09 else '?'} (todo 0 excepto placed=1).",
+        f"- **10** (`priority_evict` requiere desplazar OF existente): "
+        f"{_yn(prio_evict_ok)}  — placed="
+        f"{r10['incidencias'].get('priority_ofs_placed', 0) if r10 else '?'}, "
+        f"evictions={r10['incidencias'].get('evictions', 0) if r10 else '?'} (>=1 esperado), "
+        f"priority_violations={r10['prio_violations'] if r10 else '?'}.",
         "",
         "## Notas",
         "",

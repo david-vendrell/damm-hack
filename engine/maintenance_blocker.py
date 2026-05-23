@@ -4,6 +4,12 @@ optimizer/parser must treat as hard-blocked.
 
 Source of truth: `lookups/maintenance_schedule.parquet` produced by
 `scripts/19_build_maintenance_schedule.py`.
+
+Also exposes `apply_outages()` for callers (the optimizer) to merge
+user-supplied broken-línea outages into the block map at runtime — outages
+are treated identically to scheduled maintenance once merged: `can_place()`
+hard-rejects them, `block_audit()` flags any OF placed on them, and the
+parser marks pre-existing OFs sitting there as infeasible.
 """
 from __future__ import annotations
 
@@ -17,12 +23,12 @@ import pandas as pd
 
 @dataclass(frozen=True)
 class BlockedSlot:
-    linea:       int
-    fecha:       date
-    turno:       str        # "M" | "T" | "N"
-    event_type:  str        # "LIMPIEZA" | "MANTENIMIENTO"
-    duration_h:  float
-    reason:      str        # human-readable Spanish reason for UI
+    linea:        int
+    fecha:        date
+    turno:        str        # "M" | "T" | "N"
+    block_event:  str        # "LIMPIEZA" | "MANTENIMIENTO" | "OUTAGE"
+    duration_h:   float
+    reason:       str        # human-readable Spanish reason for UI
 
 
 def load_schedule(lookups_dir: str | Path) -> pd.DataFrame:
@@ -86,12 +92,12 @@ def projected_blocked_slots(
                     f"~{ev['duration_h']:.1f}h)"
                 )
                 out.add(BlockedSlot(
-                    linea       = int(ev["linea"]),
-                    fecha       = f,
-                    turno       = str(turno),
-                    event_type  = str(ev["event_type"]),
-                    duration_h  = float(ev["duration_h"]),
-                    reason      = reason,
+                    linea        = int(ev["linea"]),
+                    fecha        = f,
+                    turno        = str(turno),
+                    block_event  = str(ev["event_type"]),   # parquet col name stays
+                    duration_h   = float(ev["duration_h"]),
+                    reason       = reason,
                 ))
     return out
 
@@ -105,3 +111,41 @@ def blocked_slot_map(
     for O(1) lookup from the slot generator / parser."""
     return {(b.linea, b.fecha, b.turno): b
             for b in projected_blocked_slots(fechas, schedule, lookups_dir)}
+
+
+def apply_outages(
+    block_map: dict[tuple[int, date, str], BlockedSlot],
+    outages: Iterable[dict] | None,
+) -> dict[tuple[int, date, str], BlockedSlot]:
+    """Merge caller-supplied broken-línea outages into a maintenance block map.
+
+    Each outage is a dict with keys: linea (int), fecha (str/date), turno (str),
+    optional reason (str). Outages OVERWRITE any pre-existing maintenance entry
+    on the same slot (declared outage wins for UI clarity).
+
+    Returns the same dict (mutated in place) for ergonomic chaining.
+    """
+    if not outages:
+        return block_map
+    for o in outages:
+        try:
+            linea = int(o["linea"])
+            fecha = pd.Timestamp(o["fecha"]).date()
+            turno = str(o["turno"]).upper()
+        except (KeyError, ValueError, TypeError) as exc:
+            raise ValueError(
+                f"Outage entry malformed (need linea/fecha/turno): {o!r} ({exc})"
+            ) from exc
+        if turno not in {"M", "T", "N"}:
+            raise ValueError(f"Outage turno must be M/T/N, got {turno!r} in {o!r}")
+        reason = str(o.get("reason") or "Línea fuera de servicio (avería declarada)")
+        block_map[(linea, fecha, turno)] = BlockedSlot(
+            linea        = linea,
+            fecha        = fecha,
+            turno        = turno,
+            block_event  = "OUTAGE",
+            duration_h   = 8.0,
+            reason       = f"Slot bloqueado: OUTAGE en L{linea} {fecha.isoformat()} "
+                           f"(turno {turno}) — {reason}",
+        )
+    return block_map

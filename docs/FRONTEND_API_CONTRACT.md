@@ -170,12 +170,49 @@ Always check the first non-whitespace character of `summary_md` before rendering
 
 ```ts
 const result = await client.predict("/optimize_v3", {
-  file_obj: file,           // same xlsx
-  aggressive: false,        // bool — false=p50 (esperado), true=p90 (perseguir techo)
+  file_obj: file,                       // same xlsx
+  aggressive: false,                    // bool — false=p50 (esperado), true=p90 (perseguir techo)
+  outages_json: "[]",                   // OPTIONAL — JSON string, see 5.1.1
+  priority_ofs_json: "[]",              // OPTIONAL — JSON string, see 5.1.2
 });
 ```
 
 `aggressive = true` makes the optimizer pursue the achievable p90 ceiling (more ambitious recommendations); `false` optimises for the expected p50 OEE (safer recommendations).
+
+#### 5.1.1 `outages_json` — broken-línea incidents (optional)
+
+JSON-encoded string of an array. Each element marks one `(línea × día × turno)` slot as **hard-blocked** at runtime — treated identically to a CF Prat scheduled maintenance. Pre-existing OFs sitting on those slots are reassigned by the optimizer; new placements are refused.
+
+```ts
+type Outage = {
+  linea: 14 | 17 | 19;
+  fecha: string;          // ISO date "YYYY-MM-DD" — must be within plan window
+  turno: "M" | "T" | "N";
+  reason?: string;        // free-text Spanish, shown in summary + audit
+};
+// Send as: outages_json: JSON.stringify(outages)
+```
+
+Empty string or `"[]"` ⇒ no outages.
+
+#### 5.1.2 `priority_ofs_json` — urgent OFs to hard-insert (optional)
+
+JSON-encoded array of urgent OFs that **must** be placed before their `deadline`. If a feasible slot has spare capacity, the OF is dropped there; otherwise the optimizer evicts the lowest-(p50 × HL) existing OF from the best feasible slot (single-level eviction — the displaced OF is re-placed by the standard local search).
+
+```ts
+type PriorityOF = {
+  sku: string;                  // must exist in dim_sku (else format-only feasibility)
+  hl: number;                   // positive
+  deadline: string;             // ISO date — slot.fecha ≤ deadline is hard-enforced
+  preferred_linea?: 14 | 17 | 19;   // optional; intersected with format compat
+  reason?: string;              // free-text, shown in swap log
+};
+// Send as: priority_ofs_json: JSON.stringify(priorityOFs)
+```
+
+Empty string or `"[]"` ⇒ no priority OFs.
+
+> ⚠️ **HL impact.** Priority OFs are **additive** to total planned HL (they did not exist in the input plan). The HL-invariance audit excludes them; the optimized headline OEE includes their contribution.
 
 ### 5.2 Response — array of 4 elements
 
@@ -222,14 +259,24 @@ Same shape as the predict's per-línea but with `actual` vs `optimizada` columns
 | Column | Type | Example |
 |---|---|---|
 | # | int | 1 |
+| Tipo | string | `⚙️ Optimización` / `⭐ Prioritario` / `⚠️ Desplazado` / `↪️ Realojo` |
 | SKU | string | `ED13LTW` |
-| Desde | string | `L17 / 2026-05-21 / N` |
-| Hacia | string | `L19 / 2026-05-18 / T` |
+| Desde | string | `L17 / 2026-05-21 / N` (or `—` for priority inserts) |
+| Hacia | string | `L19 / 2026-05-18 / T` (or `—` for evictions without re-place) |
 | ΔOEE pts | string | `+0.10` |
-| Δ cambio min | string | `+0` |
-| Δ mant h | string | `+34` |
+| Δ cambio min | string | `+0` / `—` |
+| Δ mant h | string | `+34` / `—` |
 | Agrupa formato | string | `Sí` / `""` |
 | Descripción | string | full Spanish reason — render in monospace, this is the audit trail |
+
+The `Tipo` column distinguishes four move kinds:
+
+| Tipo | When |
+|---|---|
+| `⚙️ Optimización` | Normal OEE-improving reassignment from the local search loop |
+| `⭐ Prioritario` | A priority OF has been hard-inserted at the listed `Hacia` slot |
+| `⚠️ Desplazado` | An existing OF was evicted from its slot by a priority insert (Desde populated, Hacia null pending the realojo entry) |
+| `↪️ Realojo` | The displaced OF was reassigned to a new feasible slot (Desde null, Hacia populated) |
 
 Use this as a chronological "reassignments" panel. The `Descripción` is deterministic Spanish — safe to display directly.
 
@@ -288,6 +335,10 @@ export async function POST(req: Request) {
   const formData = await req.formData();
   const file = formData.get("file") as File | null;
   const aggressive = formData.get("aggressive") === "true";
+  // Incidencias (optional) — pass through whatever the operator entered.
+  // Each is a JSON string of an array. Empty / "[]" / missing = no incidents.
+  const outages_json      = (formData.get("outages_json")      as string) ?? "[]";
+  const priority_ofs_json = (formData.get("priority_ofs_json") as string) ?? "[]";
   if (!file) return new Response("file required", { status: 400 });
 
   const client = await Client.connect("marcaguilar/linewise-demo", {
@@ -296,6 +347,8 @@ export async function POST(req: Request) {
   const result = await client.predict("/optimize_v3", {
     file_obj: file,
     aggressive,
+    outages_json,
+    priority_ofs_json,
   });
   return Response.json({
     summary_md: result.data[0],
@@ -383,19 +436,21 @@ Reference: https://www.gradio.app/docs/js-client
 
 ## 8 · Behavioural contracts (the guarantees you can rely on)
 
-1. **Volume invariance.** `optimize_v3` never changes `sum(HL per SKU)`. Total production planned is identical before and after.
-2. **Format compatibility respected.** Optimizer never places a 1/2 SKU on L17 (1/3-only), etc. CF Prat line-format matrix is hard-enforced.
-3. **Deadline respected.** No OF is scheduled past its original `fecha` (treated as deadline).
-4. **Maintenance respected.** Optimizer never places production on a CF Prat 5-TURNOS LIMPIEZA or MANTENIMIENTO slot. Pre-existing OFs on such slots are flagged infeasible.
-5. **Determinism.** Same input file + same `aggressive` flag → identical output (verified by test #02 in the test suite).
-6. **No model drift mid-session.** The 12 LightGBM models are loaded once per container; restart triggers reload but predictions are identical to the file checksum.
-7. **All swap-log moves are auditable.** Every `swap_tbl` row's `Descripción` is computed deterministically from the operational metrics (changeover min, maint hours, format clustering). No LLM in the loop.
+1. **Volume invariance.** `optimize_v3` never changes `sum(HL per SKU)` for SKUs present in the input plan. Priority OFs (passed via `priority_ofs_json`) are **additive** — their HL is added on top and excluded from the invariance audit.
+2. **Format compatibility respected.** Optimizer never places a 1/2 SKU on L17 (1/3-only), etc. CF Prat line-format matrix is hard-enforced — applies equally to baseline OFs and priority OFs.
+3. **Deadline respected.** No OF is scheduled past its `fecha`/`deadline` — applies equally to baseline (uses `fecha`) and priority OFs (uses their `deadline` field).
+4. **Blocks respected.** Optimizer never places production on a slot marked blocked — applies equally to CF Prat 5-TURNOS LIMPIEZA / MANTENIMIENTO **and** caller-declared `OUTAGE` slots. Pre-existing OFs on such slots are flagged infeasible and reassigned by the optimizer.
+5. **Priority OF guarantee.** Every entry in `priority_ofs_json` is placed before its deadline on a feasible slot, OR surfaced explicitly in `audit.priority_violations` (and the swap log carries the reason). The optimizer never silently drops a priority OF.
+6. **Eviction is single-level and deterministic.** When a priority OF requires eviction, exactly one existing OF is displaced (the lowest `p50 × HL` occupant of the chosen slot, tie-broken by `block_id`). The displaced OF is reassigned via standard local search; if it cannot fit anywhere, that's surfaced in `audit` (rare; means the plan was already over-tight).
+7. **Determinism.** Same inputs (file + `aggressive` + `outages_json` + `priority_ofs_json`) → identical output (verified by test #02 in the test suite).
+8. **No model drift mid-session.** The 12 LightGBM models are loaded once per container; restart triggers reload but predictions are identical to the file checksum.
+9. **All swap-log moves are auditable.** Every `swap_tbl` row's `Descripción` is computed deterministically from operational metrics or incident metadata — no LLM in the loop.
 
 ---
 
 ## 9 · Demo plans available
 
-Six pre-built test Excels live in the repo at `juego_de_pruebas/` — the frontend can ship these as "Try a sample plan" presets:
+Pre-built test Excels live in the repo at `juego_de_pruebas/` — the frontend can ship these as "Try a sample plan" presets:
 
 | File | Tests |
 |---|---|
@@ -406,6 +461,9 @@ Six pre-built test Excels live in the repo at `juego_de_pruebas/` — the fronte
 | `05_infactible_sin_historico.xlsx` | Has a fake SKU `ZZNEW01` — shows low-confidence warning |
 | `06_techo_optimo.xlsx` | Already-optimal plan — do-no-harm test |
 | `07_conflicto_mantenimiento.xlsx` | Has 3 OFs in scheduled LIMPIEZA slots — shows maintenance hard-reject |
+| `08_outage_basico.xlsx` | Baseline + caller passes 1 outage on L17 — incident reassignment |
+| `09_priority_holgado.xlsx` | Baseline + caller passes 1 priority OF that fits without eviction |
+| `10_priority_evict.xlsx` | Baseline + 1 priority OF requiring single-level eviction |
 
 Also useful for screenshots / smoke-testing the integration. Real production files live in `Repte operacions/` (Damm's confidential data — do NOT bundle in the frontend).
 
@@ -421,4 +479,4 @@ Schema changes will be communicated by bumping the version line below.
 
 ---
 
-**Contract version:** `1.0.0` · last updated 2026-05-24 (after Gap 1/2/3 ship)
+**Contract version:** `1.1.0` · last updated 2026-05-24 (adds `outages_json` + `priority_ofs_json` to /optimize_v3; new `Tipo` column in swap_tbl; new `audit.priority_violations` + `audit.block_violations` keys)

@@ -222,6 +222,61 @@ def _techo_optimo() -> list[dict]:
     return rows
 
 
+def _outage_basico() -> list[dict]:
+    """Baseline plan — the runner will declare an outage on L17 Wed M
+    (currently empty in baseline, but verifies the optimizer treats it as
+    a hard block and that any pre-existing OF on it would have been moved).
+
+    Same shape as baseline_real so the comparison is clean.
+    """
+    return _baseline_real()
+
+
+def _priority_holgado() -> list[dict]:
+    """Light plan with plenty of headroom — runner declares 1 priority OF
+    that can be placed without eviction.
+    """
+    rows = []
+    seq = 1
+    # Light plan: 2 OFs per línea per día for 3 días, leaves N turno empty
+    light_skus = [(14, "ED13LTMW", 700), (17, "ED13LTW", 800), (19, "FDL13LN", 700)]
+    for d_idx in range(3):
+        for (ln, sku, hl) in light_skus:
+            for t in ("M", "T"):
+                rows.append(_sku_row(ln, sku, DAYS[d_idx], t, hl, seq)); seq += 1
+    return rows
+
+
+def _priority_evict_plan() -> list[dict]:
+    """Stress-placement: priority OF with tight deadline + preferred línea
+    forces the optimizer to find SOME feasible slot quickly.
+
+    Cap heuristic in precompute is loose (historical max ~88-172 OFs/día),
+    so true capacity-driven eviction is hard to trigger from a synthetic
+    plan without an override. This test instead exercises the placement
+    path under a tight constraint: priority OF deadline = Tue, prefers L17,
+    L17 Mon M is LIMPIEZA-blocked, so the only feasible slots are L17 Mon
+    T/N and L17 Tue M/T/N (5 slots) — placement should land at the highest
+    intrinsic-OEE one.
+    """
+    rows = []
+    seq = 1
+    # L17 Mon-Tue — moderately filled (4 OFs per shift on each unblocked slot)
+    packed_slots = [
+        (DAYS[0], "T"), (DAYS[0], "N"),
+        (DAYS[1], "M"), (DAYS[1], "T"), (DAYS[1], "N"),
+    ]
+    for (d, t) in packed_slots:
+        for _ in range(4):
+            rows.append(_sku_row(17, "ED13LTW", d, t, 400, seq)); seq += 1
+    # L14 + L19 — filler so the plan isn't L17-only
+    for d_idx in range(2):
+        for t in ("M", "T"):
+            rows.append(_sku_row(14, "ED13LTMW", DAYS[d_idx], t, 600, seq)); seq += 1
+            rows.append(_sku_row(19, "FDL13LN",  DAYS[d_idx], t, 600, seq)); seq += 1
+    return rows
+
+
 def write_xlsx(rows: list[dict], out_path: Path) -> None:
     df = pd.DataFrame(rows)
     df.to_excel(out_path, index=False, sheet_name="Planificado")
@@ -240,6 +295,9 @@ def main():
         ("05_infactible_sin_historico.xlsx", _infactible_sin_historico),
         ("06_techo_optimo.xlsx",             _techo_optimo),
         ("07_conflicto_mantenimiento.xlsx",  _con_mantenimiento_conflict),
+        ("08_outage_basico.xlsx",            _outage_basico),
+        ("09_priority_holgado.xlsx",         _priority_holgado),
+        ("10_priority_evict.xlsx",           _priority_evict_plan),
     ]
 
     for name, gen in plans:
