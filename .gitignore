@@ -1,0 +1,17 @@
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# DuckDB (uncomment if you DON'T want to commit the DB)
+# db/*.duckdb
+# db/*.duckdb.wal
+
+# IDE
+.vscode/
+.idea/
+.DS_Store
+
+# Build artifacts
+*.html.tmp
