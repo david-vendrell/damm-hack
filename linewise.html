@@ -1,0 +1,942 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8" />
+<title>LineWise · Operaciones El Prat · L14/17/19</title>
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<script src="https://cdn.plot.ly/plotly-2.35.2.min.js"></script>
+<style>
+  :root {
+    --bg: #0d1117;
+    --panel: #161b22;
+    --panel-2: #1f262d;
+    --border: #2a313a;
+    --text: #e6edf3;
+    --muted: #8b949e;
+    --accent: #e30613; /* Damm red */
+    --accent-soft: #ff4040;
+    --t14: #ffb547;
+    --t17: #4cc2ff;
+    --t19: #5fd68d;
+    --warn: #ffd166;
+    --bad:  #f06c6c;
+  }
+  * { box-sizing: border-box; }
+  html, body {
+    margin: 0; padding: 0; background: var(--bg);
+    color: var(--text);
+    font-family: -apple-system, BlinkMacSystemFont, "Inter", "Segoe UI",
+                 Roboto, "Helvetica Neue", Arial, sans-serif;
+    font-size: 14px;
+  }
+  header {
+    padding: 14px 24px;
+    border-bottom: 1px solid var(--border);
+    display: flex; align-items: center; gap: 18px;
+    background: linear-gradient(90deg, #1a0405 0%, #161b22 60%);
+  }
+  header .logo {
+    font-weight: 800; font-size: 18px; letter-spacing: 0.5px;
+  }
+  header .logo .dot { color: var(--accent); }
+  header .subtitle { color: var(--muted); font-size: 13px; }
+  header .meta { margin-left: auto; color: var(--muted); font-size: 12px; }
+  nav.tabs {
+    display: flex; gap: 4px; padding: 0 16px;
+    border-bottom: 1px solid var(--border); background: var(--panel);
+    overflow-x: auto;
+  }
+  nav.tabs button {
+    background: transparent; color: var(--muted); border: 0;
+    padding: 12px 16px; cursor: pointer; font-size: 13px;
+    border-bottom: 2px solid transparent;
+    font-family: inherit; white-space: nowrap;
+  }
+  nav.tabs button:hover { color: var(--text); }
+  nav.tabs button.active {
+    color: var(--text); border-bottom-color: var(--accent);
+    font-weight: 600;
+  }
+  .filterbar {
+    padding: 10px 24px; display: flex; gap: 16px;
+    flex-wrap: wrap; align-items: center;
+    background: var(--panel); border-bottom: 1px solid var(--border);
+  }
+  .filterbar label { color: var(--muted); font-size: 12px;
+    display:flex; gap:6px; align-items: center; }
+  .filterbar select, .filterbar input {
+    background: var(--panel-2); color: var(--text);
+    border: 1px solid var(--border); border-radius: 4px;
+    padding: 4px 8px; font-size: 13px; font-family: inherit;
+  }
+  .filterbar .pill {
+    padding: 4px 10px; border-radius: 999px; cursor: pointer;
+    border: 1px solid var(--border); color: var(--muted);
+    background: transparent; font-size: 12px;
+  }
+  .filterbar .pill.active {
+    background: var(--accent); color: white;
+    border-color: var(--accent);
+  }
+  main { padding: 20px 24px 80px; }
+  .view { display: none; }
+  .view.active { display: block; }
+  .grid {
+    display: grid; gap: 16px;
+    grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+  }
+  .card {
+    background: var(--panel); border: 1px solid var(--border);
+    border-radius: 8px; padding: 16px;
+  }
+  .card h3 {
+    margin: 0 0 10px; font-size: 12px; color: var(--muted);
+    text-transform: uppercase; letter-spacing: 0.6px; font-weight: 600;
+  }
+  .kpi { display: flex; flex-direction: column; gap: 4px; }
+  .kpi .v { font-size: 28px; font-weight: 700; line-height: 1.1; }
+  .kpi .sub { color: var(--muted); font-size: 12px; }
+  .kpi .line-mark {
+    display: inline-block; width: 10px; height: 10px;
+    border-radius: 50%; margin-right: 6px;
+  }
+  .line-14 { background: var(--t14); }
+  .line-17 { background: var(--t17); }
+  .line-19 { background: var(--t19); }
+  .chart { width: 100%; height: 360px; }
+  .chart-lg { width: 100%; height: 480px; }
+  .chart-sm { width: 100%; height: 220px; }
+  table.data {
+    width: 100%; border-collapse: collapse; font-size: 12px;
+  }
+  table.data th, table.data td {
+    padding: 6px 8px; text-align: left; border-bottom: 1px solid var(--border);
+  }
+  table.data th { color: var(--muted); font-weight: 600; }
+  table.data tr:hover td { background: var(--panel-2); }
+  .bad { color: var(--bad); }
+  .warn { color: var(--warn); }
+  .ok { color: var(--t19); }
+  .insight {
+    font-size: 12px; color: var(--muted); margin-top: 6px;
+    line-height: 1.5;
+  }
+  .legend-row { display: flex; gap: 14px; color: var(--muted); font-size: 12px;
+    margin-bottom: 6px;}
+  .row { display: grid; gap: 16px; grid-template-columns: 1fr 1fr; }
+  @media (max-width: 900px) { .row { grid-template-columns: 1fr; } }
+  details summary { cursor: pointer; color: var(--muted); }
+</style>
+</head>
+<body>
+
+<header>
+  <div class="logo">Line<span class="dot">·</span>Wise</div>
+  <div class="subtitle">Operaciones · El Prat · Líneas latas 14 / 17 / 19</div>
+  <div class="meta" id="meta-info">cargando…</div>
+</header>
+
+<nav class="tabs" id="tabs">
+  <button data-view="resumen" class="active">Resumen</button>
+  <button data-view="oee">OEE temporal</button>
+  <button data-view="cambios">Cambios → impacto</button>
+  <button data-view="mantto">Mantenimiento</button>
+  <button data-view="sku">Producto / SKU</button>
+  <button data-view="plan">Planificado vs Real</button>
+  <button data-view="matriz">Matriz cambio formato</button>
+</nav>
+
+<div class="filterbar">
+  <label>Línea
+    <span class="pill active" data-tren="all">Todas</span>
+    <span class="pill" data-tren="14">L14</span>
+    <span class="pill" data-tren="17">L17</span>
+    <span class="pill" data-tren="19">L19</span>
+  </label>
+  <label>Desde <input type="date" id="from"></label>
+  <label>Hasta <input type="date" id="to"></label>
+  <label>Familia
+    <select id="familia"><option value="">(todas)</option></select>
+  </label>
+  <span style="margin-left:auto;color:var(--muted);font-size:12px"
+        id="filter-info"></span>
+</div>
+
+<main>
+
+<!-- RESUMEN ────────────────────────────────────────────────────────────── -->
+<section class="view active" id="view-resumen">
+  <div class="grid" id="kpi-cards"></div>
+  <div class="card" style="margin-top:16px">
+    <h3>OEE diario por línea (rolling 7d)</h3>
+    <div id="chart-resumen-oee" class="chart"></div>
+    <div class="insight">Cada línea tiene una firma operativa diferente.
+      La L14 suele operar a menor OEE con más paros largos; L17/L19 corren
+      más estables pero con muchísimos más cambios de marca.</div>
+  </div>
+  <div class="row" style="margin-top:16px">
+    <div class="card">
+      <h3>Reparto de cambios por tipo</h3>
+      <div id="chart-resumen-cambios" class="chart"></div>
+    </div>
+    <div class="card">
+      <h3>Volumen producido (HL) por línea</h3>
+      <div id="chart-resumen-hl" class="chart"></div>
+    </div>
+  </div>
+</section>
+
+<!-- OEE TEMPORAL ───────────────────────────────────────────────────────── -->
+<section class="view" id="view-oee">
+  <div class="card">
+    <h3>OEE diario por línea</h3>
+    <div id="chart-oee-daily" class="chart-lg"></div>
+    <div class="insight">Líneas continuas = OEE diario medio.
+      Líneas suavizadas = media móvil 7 días para ver la tendencia.</div>
+  </div>
+  <div class="row" style="margin-top:16px">
+    <div class="card">
+      <h3>Distribución OEE por OF</h3>
+      <div id="chart-oee-hist" class="chart"></div>
+    </div>
+    <div class="card">
+      <h3>Disponibilidad vs Rendimiento por OF</h3>
+      <div id="chart-disp-rend" class="chart"></div>
+    </div>
+  </div>
+</section>
+
+<!-- CAMBIOS ────────────────────────────────────────────────────────────── -->
+<section class="view" id="view-cambios">
+  <div class="row">
+    <div class="card">
+      <h3>Tipo de cambio por línea (acumulado año)</h3>
+      <div id="chart-cambios-stack" class="chart"></div>
+    </div>
+    <div class="card">
+      <h3>Nº cambios vs OEE (cada punto = una OF)</h3>
+      <div id="chart-cambios-scatter" class="chart"></div>
+      <div class="insight">Tendencia esperada: más cambios → peor OEE.
+        Los outliers superiores son OFs donde se asumieron cambios sin gran
+        coste — candidatos a copiar; los inferiores izquierdos son OFs con
+        OEE bajo SIN apenas cambios, donde el cuello está en otra parte
+        (mantto, calidad, baja velocidad).</div>
+    </div>
+  </div>
+  <div class="card" style="margin-top:16px">
+    <h3>Top 30 OFs con cambios más ineficientes
+      <span class="insight">(score = Nº cambios × (1−OEE))</span></h3>
+    <div style="max-height:360px;overflow:auto">
+      <table class="data" id="tbl-worst-changes"></table>
+    </div>
+  </div>
+</section>
+
+<!-- MANTTO ─────────────────────────────────────────────────────────────── -->
+<section class="view" id="view-mantto">
+  <div class="row">
+    <div class="card">
+      <h3>Tiempo intervención vs OEE</h3>
+      <div id="chart-mantto-scatter" class="chart"></div>
+    </div>
+    <div class="card">
+      <h3>Llamadas vs OEE</h3>
+      <div id="chart-mantto-calls" class="chart"></div>
+    </div>
+  </div>
+  <div class="card" style="margin-top:16px">
+    <h3>Top 30 OFs con más tiempo de paro</h3>
+    <div style="max-height:360px;overflow:auto">
+      <table class="data" id="tbl-worst-mantto"></table>
+    </div>
+  </div>
+</section>
+
+<!-- SKU ────────────────────────────────────────────────────────────────── -->
+<section class="view" id="view-sku">
+  <div class="row">
+    <div class="card">
+      <h3>Top SKUs por volumen producido (HL)</h3>
+      <div id="chart-sku-hl" class="chart"></div>
+    </div>
+    <div class="card">
+      <h3>OEE medio por SKU (top volumen)</h3>
+      <div id="chart-sku-oee" class="chart"></div>
+    </div>
+  </div>
+  <div class="card" style="margin-top:16px">
+    <h3>Heatmap OEE · SKU × Línea</h3>
+    <div id="chart-sku-heatmap" class="chart-lg"></div>
+    <div class="insight">Permite ver en qué línea funciona mejor cada SKU
+      histórica­mente. Útil cuando llega una demanda urgente: ¿en qué
+      línea hemos sacado mejor OEE para este producto?</div>
+  </div>
+</section>
+
+<!-- PLAN VS REAL ───────────────────────────────────────────────────────── -->
+<section class="view" id="view-plan">
+  <div class="card">
+    <h3>Planificación semanal · 2026-05-18 → 24 (Gantt)</h3>
+    <div id="chart-plan-gantt" class="chart-lg"></div>
+    <div class="insight">Cada barra es un bloque planificado.
+      Color = línea. Los puntos rojos marcan las OFs realmente ejecutadas
+      (con su OEE real). Útil para comparar la secuencia teórica con lo
+      que terminó pasando en planta.</div>
+  </div>
+  <div class="card" style="margin-top:16px">
+    <h3>Producción real registrada en la semana</h3>
+    <div style="max-height:360px;overflow:auto">
+      <table class="data" id="tbl-real"></table>
+    </div>
+  </div>
+</section>
+
+<!-- MATRIZ ─────────────────────────────────────────────────────────────── -->
+<section class="view" id="view-matriz">
+  <div class="card">
+    <h3>Matriz de tiempos de cambio de formato (minutos)
+      <span class="insight">— fuente: Tabla CF Prat 2026</span></h3>
+    <div id="matriz-grid" class="grid" style="margin-top:8px"></div>
+    <div class="insight">Estos tiempos son los costes mínimos que asume
+      la planta cuando hay que cambiar entre formatos. Son la base de
+      cualquier optimizador de secuencia: el coste real puede ser mayor
+      si concurren varios cambios (envase + paletizado + marca).</div>
+  </div>
+  <div class="card" style="margin-top:16px">
+    <h3>Resumen de la materia prima del simulador</h3>
+    <ul class="insight" style="line-height:1.8">
+      <li><b>Tiempos adicionales por línea:</b> limpieza 8h (frecuencia
+        semanal/quincenal/mensual según turnos), esterilización 1.5h, CIP 2h.</li>
+      <li><b>Sobre la matriz:</b> "Cambio a Bandeja" es el más caro (3h
+        contra cualquier otro estado). "Cambio Paletizado" sólo es de 30min.</li>
+      <li><b>Recomendación próxima fase:</b> usar esta matriz + OEE
+        histórico por par (SKU_prev → SKU_next) para optimizar secuencia.</li>
+    </ul>
+  </div>
+</section>
+
+</main>
+
+<script src="data.js"></script>
+<script>
+// ───────────────────────────────────────────────────────────────────────
+// LineWise dashboard
+// ───────────────────────────────────────────────────────────────────────
+const D = window.__DATA__;
+if (!D) {
+  document.body.innerHTML =
+    '<div style="padding:40px;color:#f06c6c;font-family:sans-serif">' +
+    'Falta data.js — ejecuta <code>./.venv/bin/python3 build_data.py</code>' +
+    ' en la raíz del proyecto.</div>';
+  throw new Error("data.js missing");
+}
+
+const LINE_COLORS = { 14: "#ffb547", 17: "#4cc2ff", 19: "#5fd68d" };
+const STATE = {
+  tren: "all",
+  from: D.meta.date_min,
+  to:   D.meta.date_max,
+  familia: "",
+};
+
+// ── populate filter UI ─────────────────────────────────────────────────
+document.getElementById("from").value = STATE.from;
+document.getElementById("to").value = STATE.to;
+document.getElementById("from").min = D.meta.date_min;
+document.getElementById("from").max = D.meta.date_max;
+document.getElementById("to").min = D.meta.date_min;
+document.getElementById("to").max = D.meta.date_max;
+
+const famSel = document.getElementById("familia");
+D.meta.familias.forEach(f => {
+  const o = document.createElement("option"); o.value = f; o.textContent = f;
+  famSel.appendChild(o);
+});
+document.getElementById("meta-info").innerHTML =
+  `${D.meta.rows.master_with_oee.toLocaleString("es")} OFs · ` +
+  `${D.meta.date_min} → ${D.meta.date_max} · ` +
+  `generado ${D.meta.generated_at.slice(0,10)}`;
+
+// ── tab switching ──────────────────────────────────────────────────────
+document.getElementById("tabs").addEventListener("click", e => {
+  const b = e.target.closest("button"); if (!b) return;
+  document.querySelectorAll("#tabs button").forEach(x => x.classList.remove("active"));
+  b.classList.add("active");
+  document.querySelectorAll(".view").forEach(v => v.classList.remove("active"));
+  document.getElementById("view-" + b.dataset.view).classList.add("active");
+  // re-render the active view so Plotly sizes correctly on first show
+  render();
+});
+
+// filters
+document.querySelectorAll(".filterbar .pill").forEach(p => {
+  p.addEventListener("click", () => {
+    document.querySelectorAll(".filterbar .pill").forEach(x => x.classList.remove("active"));
+    p.classList.add("active");
+    STATE.tren = p.dataset.tren; render();
+  });
+});
+["from","to","familia"].forEach(id => {
+  document.getElementById(id).addEventListener("change", e => {
+    STATE[id] = e.target.value; render();
+  });
+});
+
+// ── helpers ────────────────────────────────────────────────────────────
+const fmtPct = v => v == null || isNaN(v) ? "—" : (v*100).toFixed(1) + "%";
+const fmtInt = v => v == null || isNaN(v) ? "—" : Math.round(v).toLocaleString("es");
+const fmtNum = (v,d=1) => v == null || isNaN(v) ? "—" :
+  v.toLocaleString("es", {maximumFractionDigits:d});
+
+const PLOTLY_LAYOUT = {
+  paper_bgcolor: "rgba(0,0,0,0)",
+  plot_bgcolor:  "rgba(0,0,0,0)",
+  font: { color: "#e6edf3", family: "inherit", size: 11 },
+  margin: { l: 50, r: 20, t: 24, b: 40 },
+  legend: { orientation: "h", y: -0.15, x: 0 },
+  xaxis: { gridcolor: "#2a313a", linecolor: "#2a313a", zerolinecolor: "#2a313a" },
+  yaxis: { gridcolor: "#2a313a", linecolor: "#2a313a", zerolinecolor: "#2a313a" },
+};
+const PLOTLY_CONFIG = { displayModeBar: false, responsive: true };
+
+const rollingMean = (arr, w=7) => arr.map((_,i) => {
+  const s = Math.max(0, i-w+1);
+  const slice = arr.slice(s, i+1).filter(x => x != null);
+  if (!slice.length) return null;
+  return slice.reduce((a,b)=>a+b,0) / slice.length;
+});
+
+function dateOK(d) {
+  return (!STATE.from || d >= STATE.from) && (!STATE.to || d <= STATE.to);
+}
+function trenOK(t) {
+  return STATE.tren === "all" || String(t) === STATE.tren;
+}
+function trens() {
+  return STATE.tren === "all" ? [14, 17, 19] : [parseInt(STATE.tren)];
+}
+
+// Filter master records (cambios_oee_scatter, mantto_scatter, etc.)
+function filterRecords(rows, dateKey="Fecha Fin", trenKey="TREN") {
+  return rows.filter(r => {
+    if (!trenOK(r[trenKey])) return false;
+    if (dateKey in r && r[dateKey] && !dateOK(r[dateKey])) return false;
+    if (STATE.familia && r.Familia && r.Familia !== STATE.familia) return false;
+    return true;
+  });
+}
+
+// ── KPI cards ──────────────────────────────────────────────────────────
+function renderKPIs() {
+  const root = document.getElementById("kpi-cards");
+  const tlist = trens();
+  // aggregate KPIs over selected lines from kpis_by_line (year-level)
+  let oee=0, hl=0, cambios=0, llamadas=0, paro=0, n=0;
+  tlist.forEach(t => {
+    const k = D.kpis_by_line[t]; if (!k) return;
+    oee += k.oee_mean * k.n_of; n += k.n_of;
+    hl += k.hl_total; cambios += k.cambios_total;
+    llamadas += k.llamadas_total; paro += k.paro_total_h;
+  });
+  const oee_avg = n ? oee / n : null;
+
+  const perLine = tlist.map(t => {
+    const k = D.kpis_by_line[t];
+    if (!k) return "";
+    return `<div><span class="line-mark line-${t}"></span>
+      <b>L${t}</b> · OEE ${fmtPct(k.oee_mean)} · ${fmtInt(k.hl_total)} HL ·
+      ${fmtInt(k.cambios_total)} cambios</div>`;
+  }).join("");
+
+  root.innerHTML = `
+    <div class="card kpi">
+      <h3>OEE medio anual</h3>
+      <div class="v">${fmtPct(oee_avg)}</div>
+      <div class="sub">${fmtInt(n)} OFs · ${tlist.length} línea(s)</div>
+    </div>
+    <div class="card kpi">
+      <h3>Volumen producido</h3>
+      <div class="v">${fmtInt(hl)} <span style="font-size:14px;color:var(--muted)">HL</span></div>
+      <div class="sub">año 2025</div>
+    </div>
+    <div class="card kpi">
+      <h3>Cambios totales</h3>
+      <div class="v">${fmtInt(cambios)}</div>
+      <div class="sub">${fmtInt(cambios / Math.max(1,n))} por OF</div>
+    </div>
+    <div class="card kpi">
+      <h3>Mantto · paros</h3>
+      <div class="v">${fmtInt(paro)} <span style="font-size:14px;color:var(--muted)">h</span></div>
+      <div class="sub">${fmtInt(llamadas)} llamadas</div>
+    </div>
+    <div class="card" style="grid-column: span 2">
+      <h3>Por línea</h3>
+      <div style="display:flex;flex-direction:column;gap:6px;font-size:13px">
+        ${perLine}
+      </div>
+    </div>
+  `;
+}
+
+// ── helpers for daily series ───────────────────────────────────────────
+function dailyFiltered(t) {
+  return (D.daily_by_line[t] || []).filter(d => dateOK(d.date));
+}
+
+// ── chart renderers ────────────────────────────────────────────────────
+function chartResumenOEE() {
+  const traces = [];
+  trens().forEach(t => {
+    const rows = dailyFiltered(t);
+    const x = rows.map(r => r.date);
+    const y = rows.map(r => r.oee);
+    const yr = rollingMean(y, 7);
+    traces.push({
+      x, y: yr, type: "scatter", mode: "lines",
+      name: `L${t} (7d)`,
+      line: { color: LINE_COLORS[t], width: 2.5 },
+    });
+  });
+  Plotly.react("chart-resumen-oee", traces, {
+    ...PLOTLY_LAYOUT,
+    yaxis: { ...PLOTLY_LAYOUT.yaxis, tickformat: ".0%", range:[0,1] },
+  }, PLOTLY_CONFIG);
+}
+
+function chartResumenCambios() {
+  const types = ["Brand","CAP","Envase","Palet","Primario","Producto","Secundario","Volum"];
+  const trenList = trens();
+  const traces = types.map(ty => ({
+    x: trenList.map(t => `L${t}`),
+    y: trenList.map(t => (D.cambios_breakdown[t] || {})[ty] || 0),
+    name: ty, type: "bar",
+  }));
+  Plotly.react("chart-resumen-cambios", traces, {
+    ...PLOTLY_LAYOUT, barmode: "stack",
+  }, PLOTLY_CONFIG);
+}
+
+function chartResumenHL() {
+  const trenList = trens();
+  const trace = {
+    x: trenList.map(t => `L${t}`),
+    y: trenList.map(t => (D.kpis_by_line[t]||{}).hl_total || 0),
+    type: "bar",
+    marker: { color: trenList.map(t => LINE_COLORS[t]) },
+    text: trenList.map(t => fmtInt((D.kpis_by_line[t]||{}).hl_total || 0)),
+    textposition: "outside",
+  };
+  Plotly.react("chart-resumen-hl", [trace], {
+    ...PLOTLY_LAYOUT,
+    yaxis: { ...PLOTLY_LAYOUT.yaxis, title: "HL" },
+    showlegend: false,
+  }, PLOTLY_CONFIG);
+}
+
+// ── OEE temporal ───────────────────────────────────────────────────────
+function chartOEEDaily() {
+  const traces = [];
+  trens().forEach(t => {
+    const rows = dailyFiltered(t);
+    const x = rows.map(r => r.date);
+    const y = rows.map(r => r.oee);
+    traces.push({
+      x, y, type: "scatter", mode: "markers",
+      name: `L${t}`, marker: { color: LINE_COLORS[t], size: 4, opacity: 0.5 },
+      legendgroup: `L${t}`, showlegend: true,
+    });
+    traces.push({
+      x, y: rollingMean(y, 7), type: "scatter", mode: "lines",
+      name: `L${t} 7d`, line: { color: LINE_COLORS[t], width: 2.5 },
+      legendgroup: `L${t}`, showlegend: false,
+    });
+  });
+  Plotly.react("chart-oee-daily", traces, {
+    ...PLOTLY_LAYOUT,
+    yaxis: { ...PLOTLY_LAYOUT.yaxis, tickformat: ".0%", range:[0,1] },
+  }, PLOTLY_CONFIG);
+}
+
+function chartOEEHist() {
+  const traces = trens().map(t => {
+    const rows = filterRecords(D.cambios_oee_scatter)
+      .filter(r => r.TREN === t);
+    return {
+      x: rows.map(r => r.OEE), type: "histogram",
+      name: `L${t}`, opacity: 0.7,
+      marker: { color: LINE_COLORS[t] }, xbins: { start:0, end:1, size:0.05 },
+    };
+  });
+  Plotly.react("chart-oee-hist", traces, {
+    ...PLOTLY_LAYOUT, barmode: "overlay",
+    xaxis: { ...PLOTLY_LAYOUT.xaxis, tickformat: ".0%", title: "OEE" },
+  }, PLOTLY_CONFIG);
+}
+
+function chartDispRend() {
+  const traces = trens().map(t => {
+    const rows = filterRecords(D.cambios_oee_scatter)
+      .filter(r => r.TREN === t);
+    return {
+      x: rows.map(_ => null), y: rows.map(_ => null),
+      type: "scatter", mode: "markers",
+      name: `L${t}`, visible: true,
+    };
+  });
+  // We need disponibilidad/rendimiento — not in cambios_oee_scatter.
+  // Use worst_changes + sku ranking gives no D/R. Use master data?
+  // Instead fall back to using NumCambios vs OEE per tren for now.
+  const t2 = trens().map(t => {
+    const rows = filterRecords(D.cambios_oee_scatter)
+      .filter(r => r.TREN === t);
+    return {
+      x: rows.map(r => r.NumCambios), y: rows.map(r => r.OEE),
+      type: "scatter", mode: "markers",
+      name: `L${t}`,
+      marker: { color: LINE_COLORS[t], size: 6, opacity: 0.55 },
+      text: rows.map(r => `OF ${r.OF}<br>${r.SKU || ""}`),
+      hovertemplate: "%{text}<br>Cambios: %{x}<br>OEE: %{y:.1%}<extra></extra>",
+    };
+  });
+  Plotly.react("chart-disp-rend", t2, {
+    ...PLOTLY_LAYOUT,
+    xaxis: { ...PLOTLY_LAYOUT.xaxis, title: "Nº cambios" },
+    yaxis: { ...PLOTLY_LAYOUT.yaxis, tickformat: ".0%", title: "OEE", range:[0,1] },
+  }, PLOTLY_CONFIG);
+}
+
+// ── Cambios ────────────────────────────────────────────────────────────
+function chartCambiosStack() {
+  const types = ["Brand","CAP","Envase","Palet","Primario","Producto","Secundario","Volum"];
+  const trenList = trens();
+  const traces = types.map(ty => ({
+    x: trenList.map(t => `L${t}`),
+    y: trenList.map(t => (D.cambios_breakdown[t] || {})[ty] || 0),
+    name: ty, type: "bar",
+  }));
+  Plotly.react("chart-cambios-stack", traces, {
+    ...PLOTLY_LAYOUT, barmode: "stack",
+    yaxis: { ...PLOTLY_LAYOUT.yaxis, title: "Nº cambios" },
+  }, PLOTLY_CONFIG);
+}
+
+function chartCambiosScatter() {
+  const traces = trens().map(t => {
+    const rows = filterRecords(D.cambios_oee_scatter)
+      .filter(r => r.TREN === t);
+    return {
+      x: rows.map(r => r.NumCambios),
+      y: rows.map(r => r.OEE),
+      type: "scatter", mode: "markers",
+      name: `L${t}`,
+      marker: {
+        color: LINE_COLORS[t], opacity: 0.6,
+        size: rows.map(r => Math.sqrt((r.HL || 0)+1)*0.8 + 4),
+      },
+      text: rows.map(r => `${r.SKU}<br>${r.Marca||""}`),
+      hovertemplate: "%{text}<br>Cambios %{x} · OEE %{y:.1%}<extra></extra>",
+    };
+  });
+  Plotly.react("chart-cambios-scatter", traces, {
+    ...PLOTLY_LAYOUT,
+    xaxis: { ...PLOTLY_LAYOUT.xaxis, title: "Nº cambios" },
+    yaxis: { ...PLOTLY_LAYOUT.yaxis, tickformat: ".0%", title: "OEE", range:[0,1] },
+  }, PLOTLY_CONFIG);
+}
+
+function tableWorstChanges() {
+  const rows = filterRecords(D.worst_changes).slice(0, 30);
+  const cols = [
+    ["OF","OF"],["Fecha Fin","Fecha"],["TREN","L"],["SKU","SKU"],
+    ["Marca","Marca"],["NumCambios","Nº"],["OEE","OEE"],["HL","HL"],
+    ["C. Brand","Brand"],["C. Envase","Env"],["C. Palet","Palet"],
+    ["C. Primario","Prim"],["C. Producto","Prod"],["C. Secundario","Sec"],
+  ];
+  let html = "<thead><tr>" + cols.map(c=>`<th>${c[1]}</th>`).join("")
+    + "</tr></thead><tbody>";
+  rows.forEach(r => {
+    html += "<tr>" + cols.map(([k]) => {
+      let v = r[k];
+      if (k === "OEE") v = fmtPct(v);
+      else if (k === "HL") v = fmtInt(v);
+      else if (k === "TREN") v = `L${parseInt(v)}`;
+      else if (v == null) v = "";
+      return `<td>${v}</td>`;
+    }).join("") + "</tr>";
+  });
+  html += "</tbody>";
+  document.getElementById("tbl-worst-changes").innerHTML = html;
+}
+
+// ── Mantto ─────────────────────────────────────────────────────────────
+function chartManttoScatter() {
+  const traces = trens().map(t => {
+    const rows = filterRecords(D.mantto_scatter).filter(r => r.TREN === t);
+    return {
+      x: rows.map(r => r.TIntervencion),
+      y: rows.map(r => r.OEE),
+      type: "scatter", mode: "markers",
+      name: `L${t}`,
+      marker: { color: LINE_COLORS[t], opacity: 0.55, size: 6 },
+      text: rows.map(r => `${r.SKU}<br>OF ${r.OF}`),
+      hovertemplate: "%{text}<br>Intervención %{x:.1f}h · OEE %{y:.1%}<extra></extra>",
+    };
+  });
+  Plotly.react("chart-mantto-scatter", traces, {
+    ...PLOTLY_LAYOUT,
+    xaxis: { ...PLOTLY_LAYOUT.xaxis, title: "Tiempo intervención (h)" },
+    yaxis: { ...PLOTLY_LAYOUT.yaxis, tickformat: ".0%", title: "OEE", range:[0,1] },
+  }, PLOTLY_CONFIG);
+}
+
+function chartManttoCalls() {
+  const traces = trens().map(t => {
+    const rows = filterRecords(D.mantto_scatter).filter(r => r.TREN === t);
+    return {
+      x: rows.map(r => r.NumLlamadas),
+      y: rows.map(r => r.OEE),
+      type: "scatter", mode: "markers",
+      name: `L${t}`,
+      marker: { color: LINE_COLORS[t], opacity: 0.55, size: 6 },
+    };
+  });
+  Plotly.react("chart-mantto-calls", traces, {
+    ...PLOTLY_LAYOUT,
+    xaxis: { ...PLOTLY_LAYOUT.xaxis, title: "Nº llamadas" },
+    yaxis: { ...PLOTLY_LAYOUT.yaxis, tickformat: ".0%", title: "OEE", range:[0,1] },
+  }, PLOTLY_CONFIG);
+}
+
+function tableWorstMantto() {
+  const rows = filterRecords(D.worst_mantto).slice(0, 30);
+  const cols = [
+    ["OF","OF"],["Fecha Fin","Fecha"],["TREN","L"],["SKU","SKU"],
+    ["Marca","Marca"],["NumLlamadas","Llamadas"],["TEspera","Espera (h)"],
+    ["TIntervencion","Intervención (h)"],["TParo","Paro (h)"],["OEE","OEE"],
+  ];
+  let html = "<thead><tr>" + cols.map(c=>`<th>${c[1]}</th>`).join("")
+    + "</tr></thead><tbody>";
+  rows.forEach(r => {
+    html += "<tr>" + cols.map(([k]) => {
+      let v = r[k];
+      if (k === "OEE") v = fmtPct(v);
+      else if (k === "TREN") v = `L${parseInt(v)}`;
+      else if (typeof v === "number") v = fmtNum(v, 1);
+      else if (v == null) v = "";
+      return `<td>${v}</td>`;
+    }).join("") + "</tr>";
+  });
+  html += "</tbody>";
+  document.getElementById("tbl-worst-mantto").innerHTML = html;
+}
+
+// ── SKU ────────────────────────────────────────────────────────────────
+function chartSKUHL() {
+  let rows = D.sku_ranking.slice();
+  if (STATE.familia) rows = rows.filter(r => r.Familia === STATE.familia);
+  rows = rows.sort((a,b) => b.hl - a.hl).slice(0, 20).reverse();
+  const trace = {
+    type: "bar", orientation: "h",
+    x: rows.map(r => r.hl), y: rows.map(r => r.SKU),
+    text: rows.map(r => r.Marca || ""), textposition: "auto",
+    marker: { color: "#4cc2ff" },
+  };
+  Plotly.react("chart-sku-hl", [trace], {
+    ...PLOTLY_LAYOUT,
+    margin: { ...PLOTLY_LAYOUT.margin, l: 100 },
+    xaxis: { ...PLOTLY_LAYOUT.xaxis, title: "HL" },
+  }, PLOTLY_CONFIG);
+}
+
+function chartSKUOEE() {
+  let rows = D.sku_ranking.slice();
+  if (STATE.familia) rows = rows.filter(r => r.Familia === STATE.familia);
+  rows = rows.sort((a,b) => b.hl - a.hl).slice(0, 20).reverse();
+  const trace = {
+    type: "bar", orientation: "h",
+    x: rows.map(r => r.oee), y: rows.map(r => r.SKU),
+    text: rows.map(r => fmtPct(r.oee)), textposition: "auto",
+    marker: {
+      color: rows.map(r => r.oee < 0.4 ? "#f06c6c" : r.oee < 0.55 ? "#ffd166" : "#5fd68d"),
+    },
+  };
+  Plotly.react("chart-sku-oee", [trace], {
+    ...PLOTLY_LAYOUT,
+    margin: { ...PLOTLY_LAYOUT.margin, l: 100 },
+    xaxis: { ...PLOTLY_LAYOUT.xaxis, tickformat: ".0%", title: "OEE medio", range:[0,1] },
+  }, PLOTLY_CONFIG);
+}
+
+function chartSKUHeatmap() {
+  const h = D.sku_tren_heatmap;
+  const trace = {
+    type: "heatmap",
+    z: h.z, x: h.trenes.map(t => `L${t}`), y: h.skus,
+    colorscale: [[0,"#f06c6c"],[0.5,"#ffd166"],[1,"#5fd68d"]],
+    zmin: 0, zmax: 1,
+    hovertemplate: "SKU %{y}<br>Línea %{x}<br>OEE %{z:.1%}<extra></extra>",
+    colorbar: { title: "OEE" },
+  };
+  Plotly.react("chart-sku-heatmap", [trace], {
+    ...PLOTLY_LAYOUT,
+    margin: { ...PLOTLY_LAYOUT.margin, l: 100 },
+  }, PLOTLY_CONFIG);
+}
+
+// ── Plan vs Real ───────────────────────────────────────────────────────
+function chartPlanGantt() {
+  // Build bars: x range from fecha_ini+hora_ini to next block (or end of day).
+  // Group by tren, sort by datetime.
+  let plan = D.plan_vs_real.plan.slice();
+  if (STATE.tren !== "all") plan = plan.filter(p => String(p.tren) === STATE.tren);
+  // build datetime
+  plan = plan.map(p => {
+    const dt = new Date(`${p.fecha_ini}T${p.hora_ini || "00:00:00"}`);
+    return { ...p, start: dt };
+  });
+  // group by tren and assign end = next start (or +6h)
+  const byTren = {};
+  plan.forEach(p => {
+    (byTren[p.tren] = byTren[p.tren] || []).push(p);
+  });
+  const bars = [];
+  Object.entries(byTren).forEach(([tren, items]) => {
+    items.sort((a,b) => a.start - b.start);
+    items.forEach((p, i) => {
+      const end = i+1 < items.length ? items[i+1].start
+        : new Date(p.start.getTime() + 6*3600*1000);
+      bars.push({ ...p, end });
+    });
+  });
+  const trenList = STATE.tren === "all" ? [14,17,19] : [parseInt(STATE.tren)];
+  const traces = trenList.map(t => {
+    const its = bars.filter(b => b.tren === t);
+    return {
+      type: "bar", orientation: "h",
+      base: its.map(b => b.start.toISOString()),
+      x: its.map(b => b.end - b.start),
+      y: its.map(_ => `L${t}`),
+      name: `L${t}`,
+      marker: { color: LINE_COLORS[t], line: { color: "#0d1117", width:1 } },
+      text: its.map(b =>
+        `${b.material} · ${b.cntd_plan} CAJ ${b.turno||""}`),
+      hovertemplate: "%{text}<br>%{base|%Y-%m-%d %H:%M}<extra></extra>",
+      textposition: "inside", insidetextanchor: "start",
+    };
+  });
+  // real production overlay
+  let real = D.plan_vs_real.real.slice();
+  if (STATE.tren !== "all") real = real.filter(r => String(r.tren) === STATE.tren);
+  traces.push({
+    type: "scatter", mode: "markers",
+    x: real.map(r => r.fecha),
+    y: real.map(r => `L${parseInt(r.tren)}`),
+    marker: { color: real.map(r =>
+      r.oee == null ? "#888" : r.oee < 0.4 ? "#f06c6c" :
+        r.oee < 0.55 ? "#ffd166" : "#5fd68d"),
+      size: 12, symbol: "diamond",
+      line: { color: "white", width: 1 } },
+    name: "Real (OEE)",
+    text: real.map(r => `${r.sku}<br>OEE ${fmtPct(r.oee)} · ${fmtInt(r.hl)} HL`),
+    hovertemplate: "%{text}<extra></extra>",
+  });
+  Plotly.react("chart-plan-gantt", traces, {
+    ...PLOTLY_LAYOUT,
+    barmode: "stack",
+    xaxis: { ...PLOTLY_LAYOUT.xaxis, type: "date" },
+    yaxis: { ...PLOTLY_LAYOUT.yaxis, categoryorder: "array",
+             categoryarray: trenList.map(t => `L${t}`).reverse() },
+  }, PLOTLY_CONFIG);
+}
+
+function tableReal() {
+  let rows = D.plan_vs_real.real.slice();
+  if (STATE.tren !== "all") rows = rows.filter(r => String(r.tren) === STATE.tren);
+  rows.sort((a,b) => (a.fecha > b.fecha ? 1 : -1));
+  const cols = [
+    ["fecha","Fecha"],["tren","L"],["of","OF"],["sku","SKU"],
+    ["marca","Marca"],["uds","UDS"],["hl","HL"],["oee","OEE"],
+  ];
+  let html = "<thead><tr>" + cols.map(c=>`<th>${c[1]}</th>`).join("")
+    + "</tr></thead><tbody>";
+  rows.forEach(r => {
+    html += "<tr>" + cols.map(([k]) => {
+      let v = r[k];
+      if (k === "oee") v = fmtPct(v);
+      else if (k === "tren") v = `L${parseInt(v)}`;
+      else if (typeof v === "number") v = fmtNum(v, 1);
+      else if (v == null) v = "";
+      return `<td>${v}</td>`;
+    }).join("") + "</tr>";
+  });
+  html += "</tbody>";
+  document.getElementById("tbl-real").innerHTML = html;
+}
+
+// ── Matriz ─────────────────────────────────────────────────────────────
+function renderMatriz() {
+  const root = document.getElementById("matriz-grid");
+  root.innerHTML = "";
+  Object.entries(D.change_matrix).forEach(([tren, m]) => {
+    const div = document.createElement("div");
+    div.className = "card";
+    div.innerHTML = `<h3>${tren}</h3><div id="mz-${tren.replace(/\s/g,"")}"
+      class="chart"></div>`;
+    root.appendChild(div);
+    const labels = m.labels;
+    const z = m.matrix.map(r => r.values);
+    const zmax = Math.max(...z.flat().filter(v => v != null), 60);
+    const text = z.map(row => row.map(v => v == null ? "" :
+      v >= 60 ? `${(v/60).toFixed(v%60===0?0:2).replace(/\.?0+$/,"")}h` : `${v}m`));
+    Plotly.react(`mz-${tren.replace(/\s/g,"")}`, [{
+      type: "heatmap",
+      z, x: labels, y: m.matrix.map(r => r.from),
+      text, texttemplate: "%{text}", hoverinfo: "x+y+z",
+      colorscale: [[0,"#1f262d"],[0.3,"#ffd166"],[1,"#f06c6c"]],
+      zmin: 0, zmax,
+      showscale: false,
+    }], {
+      ...PLOTLY_LAYOUT,
+      margin: { l: 120, r: 10, t: 10, b: 80 },
+      xaxis: { ...PLOTLY_LAYOUT.xaxis, side: "bottom", tickangle: -25 },
+      yaxis: { ...PLOTLY_LAYOUT.yaxis, autorange: "reversed" },
+    }, PLOTLY_CONFIG);
+  });
+}
+
+// ── master render ──────────────────────────────────────────────────────
+const RENDERERS = {
+  resumen: () => { renderKPIs(); chartResumenOEE(); chartResumenCambios();
+                   chartResumenHL(); },
+  oee: () => { chartOEEDaily(); chartOEEHist(); chartDispRend(); },
+  cambios: () => { chartCambiosStack(); chartCambiosScatter();
+                   tableWorstChanges(); },
+  mantto: () => { chartManttoScatter(); chartManttoCalls();
+                  tableWorstMantto(); },
+  sku: () => { chartSKUHL(); chartSKUOEE(); chartSKUHeatmap(); },
+  plan: () => { chartPlanGantt(); tableReal(); },
+  matriz: () => { renderMatriz(); },
+};
+
+function render() {
+  const active = document.querySelector("#tabs button.active").dataset.view;
+  document.getElementById("filter-info").textContent =
+    `Filtro · ${STATE.tren === "all" ? "L14+L17+L19" : "L"+STATE.tren} · ` +
+    `${STATE.from} → ${STATE.to}` +
+    (STATE.familia ? ` · ${STATE.familia}` : "");
+  RENDERERS[active]();
+}
+
+// auto-activate view from ?view= or #view
+(function autoView() {
+  const params = new URLSearchParams(location.search);
+  const v = params.get("view") || (location.hash || "").replace("#","");
+  if (!v) return;
+  const btn = document.querySelector(`#tabs button[data-view="${v}"]`);
+  if (btn) btn.click();
+})();
+
+render();
+</script>
+</body>
+</html>
