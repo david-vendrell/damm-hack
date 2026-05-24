@@ -13,9 +13,13 @@ import type {
   PlanResumen,
   PostMortemResumen,
   Recomendacion,
+  RecomendacionSemana,
+  SemanaPostMortem,
   TipoCambio,
   Urgencia,
   Veredicto,
+  WeekBrief,
+  WeekBriefKpi,
 } from '@/types';
 
 // ---------- POST MORTEM ----------
@@ -57,19 +61,433 @@ export async function postMortemCambios(linea?: Linea) {
 }
 
 export async function postMortemDistribucion(sku: string, linea: Linea) {
-  const [skuRow, baseline, obs] = await Promise.all([
+  const [skuRow, baseline, obs, ofs] = await Promise.all([
     prisma.sku.findUnique({ where: { codigo: sku } }),
     prisma.skuLineaBaseline.findUnique({ where: { skuCodigo_linea: { skuCodigo: sku, linea } } }),
     prisma.oeeObservacion.findMany({ where: { skuCodigo: sku, linea }, orderBy: { id: 'asc' } }),
+    prisma.ofHecho.findMany({ where: { sku, linea }, orderBy: { fechaFin: 'asc' } }),
   ]);
   if (!skuRow || !baseline) return null;
+  const valoresOee = obs.map((o) => o.oee);
+
+  const tendenciaSemanal = buildWeeklyTrend(ofs);
+  const histograma = buildHistogram(valoresOee);
+  const percentilesRaw = computePercentiles(valoresOee, [0.25, 0.5, 0.75, 0.9]);
+
   return {
     sku,
     nombre: skuRow.nombre,
     linea,
-    valoresOee: obs.map((o) => o.oee),
+    valoresOee,
     mediana: baseline.oeeMediana,
     alcanzable: baseline.oeeAlcanzable,
+    histograma,
+    tendenciaSemanal,
+    percentiles: {
+      p25: percentilesRaw[0],
+      p50: percentilesRaw[1],
+      p75: percentilesRaw[2],
+      p90: percentilesRaw[3],
+    },
+  };
+}
+
+// ---- Weekly explorer (Feature 1) + brief (Feature 2) ----
+
+const MESES_ES = ['ene', 'feb', 'mar', 'abr', 'may', 'jun', 'jul', 'ago', 'sep', 'oct', 'nov', 'dic'];
+
+function weekLabel(semana: number, anio: number, desde: Date, hasta: Date): string {
+  const d1 = desde.getUTCDate();
+  const d2 = hasta.getUTCDate();
+  const m1 = MESES_ES[desde.getUTCMonth()];
+  const m2 = MESES_ES[hasta.getUTCMonth()];
+  if (m1 === m2) return `Sem ${semana} · ${d1}-${d2} ${m1} ${anio}`;
+  return `Sem ${semana} · ${d1} ${m1} a ${d2} ${m2} ${anio}`;
+}
+
+function buildHistogram(values: number[]): { bucket: string; desde: number; hasta: number; count: number }[] {
+  const buckets = Array.from({ length: 10 }, (_, i) => ({
+    bucket: `${i * 10}-${(i + 1) * 10}%`,
+    desde: i * 0.1,
+    hasta: (i + 1) * 0.1,
+    count: 0,
+  }));
+  for (const v of values) {
+    if (v < 0 || v > 1) continue;
+    const i = Math.min(9, Math.floor(v * 10));
+    if (i >= 0) buckets[i].count++;
+  }
+  return buckets;
+}
+
+function computePercentiles(values: number[], quantiles: number[]): number[] {
+  if (values.length === 0) return quantiles.map(() => 0);
+  const sorted = [...values].sort((a, b) => a - b);
+  return quantiles.map((q) => {
+    const idx = q * (sorted.length - 1);
+    const lo = Math.floor(idx);
+    const hi = Math.ceil(idx);
+    if (lo === hi) return sorted[lo];
+    return sorted[lo] + (sorted[hi] - sorted[lo]) * (idx - lo);
+  });
+}
+
+function buildWeeklyTrend(
+  ofs: { anio: number; semanaIso: number; oee: number; hl: number }[],
+): { semana: number; anio: number; oee: number; n: number }[] {
+  const m = new Map<string, { anio: number; semana: number; oeeSum: number; hlSum: number; n: number }>();
+  for (const o of ofs) {
+    const k = `${o.anio}|${o.semanaIso}`;
+    let cur = m.get(k);
+    if (!cur) {
+      cur = { anio: o.anio, semana: o.semanaIso, oeeSum: 0, hlSum: 0, n: 0 };
+      m.set(k, cur);
+    }
+    cur.oeeSum += o.oee * o.hl;
+    cur.hlSum += o.hl;
+    cur.n += 1;
+  }
+  return [...m.values()]
+    .map((w) => ({
+      semana: w.semana,
+      anio: w.anio,
+      oee: w.hlSum > 0 ? w.oeeSum / w.hlSum : 0,
+      n: w.n,
+    }))
+    .sort((a, b) => a.anio - b.anio || a.semana - b.semana);
+}
+
+interface OfRow {
+  anio: number;
+  semanaIso: number;
+  linea: number;
+  sku: string;
+  oee: number;
+  hl: number;
+  tieneCambio: boolean;
+  fechaFin: Date;
+}
+
+function hlWeighted(rows: OfRow[]): number {
+  const total = rows.reduce((a, r) => a + r.hl, 0);
+  if (total <= 0) return 0;
+  return rows.reduce((a, r) => a + r.oee * r.hl, 0) / total;
+}
+
+function alcanzableHlWeighted(
+  rows: OfRow[],
+  baselineIdx: Map<string, { oeeAlcanzable: number }>,
+  fallbackIdx?: Map<string, number>,
+): number {
+  let total = 0;
+  let w = 0;
+  for (const r of rows) {
+    const key = `${r.sku}|${r.linea}`;
+    const b = baselineIdx.get(key);
+    const alc = b?.oeeAlcanzable ?? fallbackIdx?.get(key);
+    if (alc === undefined) continue;
+    w += alc * r.hl;
+    total += r.hl;
+  }
+  return total > 0 ? w / total : 0;
+}
+
+/** Per-(sku, línea) historical p80 from the OfHecho table — used as the
+ * "alcanzable" fallback when SkuLineaBaseline has no row for the pair.
+ * Returns a Map keyed by `${sku}|${linea}`. */
+function buildSkuLineaP80Fallback(rows: OfRow[]): Map<string, number> {
+  const grouped = new Map<string, number[]>();
+  for (const r of rows) {
+    const k = `${r.sku}|${r.linea}`;
+    const arr = grouped.get(k) ?? [];
+    arr.push(r.oee);
+    grouped.set(k, arr);
+  }
+  const out = new Map<string, number>();
+  for (const [k, values] of grouped) {
+    if (values.length < 3) continue; // need a few points to call it a "ceiling"
+    const [p80] = computePercentiles(values, [0.8]);
+    out.set(k, p80);
+  }
+  return out;
+}
+
+export async function postMortemWeekly(linea?: Linea): Promise<SemanaPostMortem[]> {
+  const rows = await prisma.ofHecho.findMany({
+    where: linea ? { linea } : undefined,
+    orderBy: [{ anio: 'desc' }, { semanaIso: 'desc' }],
+  });
+  if (rows.length === 0) return [];
+
+  const baselines = await prisma.skuLineaBaseline.findMany();
+  const baselineIdx = new Map(baselines.map((b) => [`${b.skuCodigo}|${b.linea}`, b]));
+  // Fallback p80 from the historical OFs themselves (covers SKUs without a
+  // seeded SkuLineaBaseline row — common in the dev DB after `npm run ingest`).
+  const fallbackIdx = buildSkuLineaP80Fallback(rows);
+
+  const buckets = new Map<
+    string,
+    { anio: number; semana: number; rows: OfRow[]; dateMin: Date; dateMax: Date }
+  >();
+  for (const r of rows) {
+    const k = `${r.anio}|${r.semanaIso}`;
+    let cur = buckets.get(k);
+    if (!cur) {
+      cur = { anio: r.anio, semana: r.semanaIso, rows: [], dateMin: r.fechaFin, dateMax: r.fechaFin };
+      buckets.set(k, cur);
+    }
+    cur.rows.push(r);
+    if (r.fechaFin < cur.dateMin) cur.dateMin = r.fechaFin;
+    if (r.fechaFin > cur.dateMax) cur.dateMax = r.fechaFin;
+  }
+
+  const out: SemanaPostMortem[] = [];
+  for (const b of buckets.values()) {
+    const hlTotal = b.rows.reduce((a, r) => a + r.hl, 0);
+    const oeeActual = hlWeighted(b.rows);
+    const oeeAlcanzable = alcanzableHlWeighted(b.rows, baselineIdx, fallbackIdx);
+
+    const porLinea: SemanaPostMortem['porLinea'] = [];
+    for (const ln of [14, 17, 19] as Linea[]) {
+      const lineaRows = b.rows.filter((r) => r.linea === ln);
+      if (lineaRows.length === 0) continue;
+      const lAct = hlWeighted(lineaRows);
+      const lAlc = alcanzableHlWeighted(lineaRows, baselineIdx, fallbackIdx);
+      porLinea.push({
+        linea: ln,
+        oeeActual: lAct,
+        oeeAlcanzable: lAlc,
+        perdidaPts: Math.max(0, (lAlc - lAct) * 100),
+        nOfs: lineaRows.length,
+      });
+    }
+
+    out.push({
+      semana: b.semana,
+      anio: b.anio,
+      semanaLabel: weekLabel(b.semana, b.anio, b.dateMin, b.dateMax),
+      desde: b.dateMin.toISOString().slice(0, 10),
+      hasta: b.dateMax.toISOString().slice(0, 10),
+      oeeActual,
+      oeeAlcanzable,
+      perdidaPts: Math.max(0, (oeeAlcanzable - oeeActual) * 100),
+      hlTotal,
+      nOfs: b.rows.length,
+      porLinea,
+    });
+  }
+
+  out.sort((a, b) => b.anio - a.anio || b.semana - a.semana);
+  return out;
+}
+
+function pctEs(n: number): string {
+  return `${Math.round(n * 100)}%`;
+}
+
+function hlEs(n: number): string {
+  return `${Math.round(n).toLocaleString('es-ES')} Hl`;
+}
+
+export async function postMortemBrief(
+  semana: number,
+  anio: number,
+  linea?: Linea,
+): Promise<WeekBrief> {
+  const rows = await prisma.ofHecho.findMany({
+    where: linea ? { semanaIso: semana, anio, linea } : { semanaIso: semana, anio },
+    orderBy: { fechaFin: 'asc' },
+  });
+
+  if (rows.length === 0) {
+    return {
+      semana,
+      anio,
+      semanaLabel: `Sem ${semana} · ${anio}`,
+      summary: 'Sin OFs registradas para esta semana en el ámbito seleccionado.',
+      kpis: [],
+      recomendaciones: [],
+    };
+  }
+
+  const dateMin = rows.reduce((a, r) => (r.fechaFin < a ? r.fechaFin : a), rows[0].fechaFin);
+  const dateMax = rows.reduce((a, r) => (r.fechaFin > a ? r.fechaFin : a), rows[0].fechaFin);
+  const semanaLabel = weekLabel(semana, anio, dateMin, dateMax);
+
+  const pairs = new Set<string>(rows.map((r) => `${r.sku}|${r.linea}`));
+  const baselines = await prisma.skuLineaBaseline.findMany({
+    where: { OR: [...pairs].map((p) => {
+      const [skuCodigo, ln] = p.split('|');
+      return { skuCodigo, linea: Number(ln) };
+    }) },
+  });
+  const baselineIdx = new Map(baselines.map((b) => [`${b.skuCodigo}|${b.linea}`, b]));
+
+  // Historical fallback p80 for SKU+línea pairs not in SkuLineaBaseline.
+  // Pull all OFs for these pairs (any week) to compute a meaningful ceiling.
+  const skusInWeek = [...new Set(rows.map((r) => r.sku))];
+  const lineasInWeek = [...new Set(rows.map((r) => r.linea))];
+  const historicalRows = await prisma.ofHecho.findMany({
+    where: { sku: { in: skusInWeek }, linea: { in: lineasInWeek } },
+  });
+  const fallbackIdx = buildSkuLineaP80Fallback(historicalRows);
+
+  const hlTotal = rows.reduce((a, r) => a + r.hl, 0);
+  const oeeActual = hlWeighted(rows);
+  const oeeAlcanzable = alcanzableHlWeighted(rows, baselineIdx, fallbackIdx);
+  const perdidaPts = Math.max(0, (oeeAlcanzable - oeeActual) * 100);
+
+  // Compare to previous week of the same year
+  const previousWeek = await prisma.ofHecho.findMany({
+    where: linea ? { semanaIso: semana - 1, anio, linea } : { semanaIso: semana - 1, anio },
+  });
+  const oeePrev = previousWeek.length > 0 ? hlWeighted(previousWeek) : null;
+  const deltaPrev = oeePrev !== null ? (oeeActual - oeePrev) * 100 : null;
+
+  const recomendaciones: RecomendacionSemana[] = [];
+
+  // Recommendation source A: per-línea brecha vs alcanzable
+  for (const ln of [14, 17, 19] as Linea[]) {
+    if (linea && ln !== linea) continue;
+    const lineaRows = rows.filter((r) => r.linea === ln);
+    if (lineaRows.length === 0) continue;
+    const lAct = hlWeighted(lineaRows);
+    const lAlc = alcanzableHlWeighted(lineaRows, baselineIdx, fallbackIdx);
+    const gap = (lAlc - lAct) * 100;
+    if (gap < 3) continue;
+    const lhl = lineaRows.reduce((a, r) => a + r.hl, 0);
+    const lostHl = Math.round((gap / 100) * lhl);
+    recomendaciones.push({
+      titulo: `Subir L${ln} hacia su techo alcanzable`,
+      descripcion: `L${ln} produjo ${pctEs(lAct)} frente al alcanzable ${pctEs(lAlc)}. La brecha es de ${gap.toFixed(1)} pp.`,
+      gananciaPotencialPts: Math.round(gap * lhl / hlTotal * 10) / 10,
+      gananciaPotencialHl: lostHl,
+      evidencia: `${lineaRows.length} OFs · ${hlEs(lhl)} en L${ln}`,
+    });
+  }
+
+  // Recommendation source B: cambios penalizan
+  const conCambio = rows.filter((r) => r.tieneCambio);
+  const sinCambio = rows.filter((r) => !r.tieneCambio);
+  if (conCambio.length > 0 && sinCambio.length > 0) {
+    const oeeConCambio = hlWeighted(conCambio);
+    const oeeSinCambio = hlWeighted(sinCambio);
+    const diffPts = (oeeSinCambio - oeeConCambio) * 100;
+    if (diffPts > 4) {
+      const hlConCambio = conCambio.reduce((a, r) => a + r.hl, 0);
+      const lostHl = Math.round((diffPts / 100) * hlConCambio);
+      const fraction = hlConCambio / hlTotal;
+      recomendaciones.push({
+        titulo: 'Agrupar OFs para reducir cambios',
+        descripcion: `Las OFs con cambio rindieron ${pctEs(oeeConCambio)} frente a las sin cambio ${pctEs(oeeSinCambio)}. La brecha es de ${diffPts.toFixed(1)} pp.`,
+        gananciaPotencialPts: Math.round(diffPts * fraction * 10) / 10,
+        gananciaPotencialHl: lostHl,
+        evidencia: `${conCambio.length} OFs con cambio · ${sinCambio.length} sin cambio`,
+      });
+    }
+  }
+
+  // Recommendation source C: SKUs muy por debajo de su alcanzable
+  interface SkuPerf {
+    sku: string;
+    linea: Linea;
+    actMean: number;
+    alcMean: number;
+    gap: number;
+    hl: number;
+    n: number;
+  }
+  const bySku = new Map<string, { rows: OfRow[]; linea: Linea }>();
+  for (const r of rows) {
+    const k = `${r.sku}|${r.linea}`;
+    let cur = bySku.get(k);
+    if (!cur) {
+      cur = { rows: [], linea: r.linea as Linea };
+      bySku.set(k, cur);
+    }
+    cur.rows.push(r);
+  }
+  const skuPerf: SkuPerf[] = [];
+  for (const [k, v] of bySku) {
+    const [sku] = k.split('|');
+    const baselineAlc = baselineIdx.get(k)?.oeeAlcanzable;
+    const fallbackAlc = fallbackIdx.get(k);
+    const alcMean = baselineAlc ?? fallbackAlc;
+    if (alcMean === undefined) continue;
+    const hl = v.rows.reduce((a, r) => a + r.hl, 0);
+    if (hl < 500) continue;
+    const actMean = hlWeighted(v.rows);
+    const gap = (alcMean - actMean) * 100;
+    if (gap < 8) continue;
+    skuPerf.push({
+      sku,
+      linea: v.linea,
+      actMean,
+      alcMean,
+      gap,
+      hl,
+      n: v.rows.length,
+    });
+  }
+  skuPerf.sort((a, b) => b.gap * b.hl - a.gap * a.hl);
+  for (const s of skuPerf.slice(0, 2)) {
+    const lostHl = Math.round((s.gap / 100) * s.hl);
+    recomendaciones.push({
+      titulo: `Revisar SKU ${s.sku} en L${s.linea}`,
+      descripcion: `Rindió ${pctEs(s.actMean)} (${s.n} OFs, ${hlEs(s.hl)}) frente al alcanzable ${pctEs(s.alcMean)}. La brecha es de ${s.gap.toFixed(1)} pp.`,
+      gananciaPotencialPts: Math.round((s.gap * s.hl / hlTotal) * 10) / 10,
+      gananciaPotencialHl: lostHl,
+      evidencia: `Baseline histórico p80 ${pctEs(s.alcMean)}`,
+    });
+  }
+
+  // Watchout: peor que la semana anterior
+  if (deltaPrev !== null && deltaPrev < -2) {
+    recomendaciones.push({
+      titulo: 'Vigilancia: peor que la semana anterior',
+      descripcion: `El OEE cayó ${Math.abs(deltaPrev).toFixed(1)} pp respecto a la semana ${semana - 1}. Revisar qué cambió en el mix de OFs.`,
+      gananciaPotencialPts: Math.round(Math.abs(deltaPrev) * 10) / 10,
+      gananciaPotencialHl: Math.round((Math.abs(deltaPrev) / 100) * hlTotal),
+      evidencia: `Sem ${semana - 1}: ${pctEs(oeePrev!)} · Sem ${semana}: ${pctEs(oeeActual)}`,
+    });
+  }
+
+  // Sort by potential gain and cap at 4
+  recomendaciones.sort((a, b) => b.gananciaPotencialPts - a.gananciaPotencialPts);
+  const top = recomendaciones.slice(0, 4);
+
+  // Summary prose (deterministic)
+  const summaryParts: string[] = [];
+  if (perdidaPts >= 5) {
+    summaryParts.push(`La semana ${semana} perdió ${perdidaPts.toFixed(1)} pp frente al alcanzable.`);
+  } else if (perdidaPts >= 1) {
+    summaryParts.push(`La semana ${semana} estuvo cerca de su techo (brecha ${perdidaPts.toFixed(1)} pp).`);
+  } else {
+    summaryParts.push(`La semana ${semana} alcanzó su techo.`);
+  }
+  if (deltaPrev !== null) {
+    if (deltaPrev > 1) summaryParts.push(`Mejora de ${deltaPrev.toFixed(1)} pp respecto a la semana anterior.`);
+    else if (deltaPrev < -1) summaryParts.push(`Cae ${Math.abs(deltaPrev).toFixed(1)} pp respecto a la semana anterior.`);
+  }
+  if (top.length > 0) {
+    summaryParts.push(`Se detectan ${top.length} palancas para la próxima semana similar.`);
+  }
+  const summary = summaryParts.join(' ');
+
+  const kpis: WeekBriefKpi[] = [
+    { label: 'OEE actual', value: pctEs(oeeActual) },
+    { label: 'Alcanzable', value: pctEs(oeeAlcanzable), accent: 'moss' },
+    { label: 'Pérdida', value: `${perdidaPts.toFixed(1)} pp`, accent: 'damm' },
+    { label: 'HL totales', value: hlEs(hlTotal) },
+  ];
+
+  return {
+    semana,
+    anio,
+    semanaLabel,
+    summary,
+    kpis,
+    recomendaciones: top,
   };
 }
 

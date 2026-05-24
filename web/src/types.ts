@@ -30,6 +30,51 @@ export interface DistribucionSku {
   valoresOee: number[];
   mediana: number;
   alcanzable: number;
+  // Optional enhancements (back-compat): histogram, weekly trend, percentiles
+  histograma?: { bucket: string; desde: number; hasta: number; count: number }[];
+  tendenciaSemanal?: { semana: number; anio: number; oee: number; n: number }[];
+  percentiles?: { p25: number; p50: number; p75: number; p90: number };
+}
+
+// ---- Post-mortem weekly explorer (Feature 1) ----
+
+export interface SemanaPostMortem {
+  semana: number;            // ISO week 1-52
+  anio: number;
+  semanaLabel: string;       // 'Sem 21 · 19-25 may 2025'
+  desde: string;             // ISO date of first OF in week
+  hasta: string;             // ISO date of last OF in week
+  oeeActual: number;         // 0-1, HL-weighted
+  oeeAlcanzable: number;     // 0-1, HL-weighted from SkuLineaBaseline
+  perdidaPts: number;        // (oeeAlcanzable - oeeActual) * 100
+  hlTotal: number;
+  nOfs: number;
+  porLinea: { linea: Linea; oeeActual: number; oeeAlcanzable: number; perdidaPts: number; nOfs: number }[];
+}
+
+// ---- Post-mortem brief (Feature 2, deterministic) ----
+
+export interface RecomendacionSemana {
+  titulo: string;
+  descripcion: string;
+  gananciaPotencialPts: number;
+  gananciaPotencialHl: number;
+  evidencia: string;
+}
+
+export interface WeekBriefKpi {
+  label: string;
+  value: string;
+  accent?: 'damm' | 'gold' | 'moss';
+}
+
+export interface WeekBrief {
+  semana: number;
+  anio: number;
+  semanaLabel: string;
+  summary: string;
+  kpis: WeekBriefKpi[];
+  recomendaciones: RecomendacionSemana[];
 }
 
 export interface FilaPlan {
