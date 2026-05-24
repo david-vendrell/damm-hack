@@ -90,13 +90,6 @@ function WorkspaceTabs() {
       </button>
       <button
         type="button"
-        className="relative -mb-px flex items-center gap-2 border-b-2 border-transparent px-3.5 py-2 text-xs text-ink-3 hover:text-ink-2"
-      >
-        <span className="font-mono text-[9px] uppercase tracking-[0.16em] text-ink-4">02</span>
-        Jefe de turno
-      </button>
-      <button
-        type="button"
         className="ml-1 flex h-7 w-7 items-center justify-center rounded-full text-ink-3 hover:bg-linen hover:text-ink"
         aria-label="Nueva vista"
       >

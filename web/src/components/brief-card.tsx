@@ -1,12 +1,15 @@
 'use client';
 
 import Link from 'next/link';
+import { useEffect, useState } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import { useScope } from './scope-provider';
-import { ArrowUpRight, Sparkles, TrendingDown, TrendingUp, Triangle } from './icons';
+import { ArrowUpRight, ChevronDown, Sparkles, TrendingDown, TrendingUp, Triangle } from './icons';
 import { cn } from '@/lib/utils';
 import { DeltaPill, Skeleton } from './ui';
 import type { BriefCallout, BriefData, BriefSeverity } from '@/server/brief';
+
+const BRIEF_COLLAPSED_KEY = 'damm:brief-collapsed';
 
 async function jget<T>(url: string): Promise<T> {
   const r = await fetch(url);
@@ -22,10 +25,35 @@ export function BriefHero() {
     staleTime: 60_000,
   });
 
+  const [collapsed, setCollapsed] = useState(false);
+  useEffect(() => {
+    try {
+      setCollapsed(window.localStorage.getItem(BRIEF_COLLAPSED_KEY) === '1');
+    } catch {}
+  }, []);
+  const toggle = () => {
+    setCollapsed((prev) => {
+      const next = !prev;
+      try {
+        window.localStorage.setItem(BRIEF_COLLAPSED_KEY, next ? '1' : '0');
+      } catch {}
+      return next;
+    });
+  };
+
   if (q.isLoading) return <BriefSkeleton />;
   const data = q.data;
   if (!data) return null;
   if (!data.callouts.length) return null;
+
+  const visibleCount = Math.min(data.callouts.length, 3);
+  const sevCounts = data.callouts.slice(0, 3).reduce(
+    (acc, c) => {
+      acc[c.severity] = (acc[c.severity] ?? 0) + 1;
+      return acc;
+    },
+    {} as Record<BriefSeverity, number>,
+  );
 
   return (
     <section
@@ -33,7 +61,16 @@ export function BriefHero() {
       className="relative overflow-hidden rounded-card border border-hairline bg-surface shadow-card animate-fade-in"
     >
       {/* Top eyebrow band */}
-      <div className="flex items-center justify-between border-b border-hairline bg-bone/60 px-6 py-3">
+      <button
+        type="button"
+        onClick={toggle}
+        aria-expanded={!collapsed}
+        aria-controls="brief-callouts"
+        className={cn(
+          'flex w-full items-center justify-between gap-3 bg-bone/60 px-6 py-3 text-left transition-colors hover:bg-bone',
+          !collapsed && 'border-b border-hairline',
+        )}
+      >
         <div className="flex items-center gap-3">
           <div className="flex h-7 w-7 items-center justify-center rounded-full bg-ink text-surface">
             <Sparkles className="h-3.5 w-3.5" strokeWidth={2} />
@@ -53,33 +90,78 @@ export function BriefHero() {
             </div>
           </div>
         </div>
-        <div className="hidden md:flex items-center gap-4 text-[11px] text-ink-3">
-          <span className="flex items-center gap-1.5">
-            <span className="h-1.5 w-1.5 rounded-full bg-damm" />
-            Crítico
+        <div className="flex items-center gap-4">
+          {collapsed ? (
+            <div className="flex items-center gap-3 text-[11px] text-ink-3">
+              {sevCounts.critical ? (
+                <span className="flex items-center gap-1.5">
+                  <span className="h-1.5 w-1.5 rounded-full bg-damm" />
+                  <span className="num">{sevCounts.critical}</span> crítico
+                </span>
+              ) : null}
+              {sevCounts.warning ? (
+                <span className="flex items-center gap-1.5">
+                  <span className="h-1.5 w-1.5 rounded-full bg-gold" />
+                  <span className="num">{sevCounts.warning}</span> atención
+                </span>
+              ) : null}
+              {sevCounts.positive ? (
+                <span className="flex items-center gap-1.5">
+                  <span className="h-1.5 w-1.5 rounded-full bg-moss" />
+                  <span className="num">{sevCounts.positive}</span> positivo
+                </span>
+              ) : null}
+              {!sevCounts.critical && !sevCounts.warning && !sevCounts.positive ? (
+                <span>
+                  <span className="num">{visibleCount}</span> destacados
+                </span>
+              ) : null}
+            </div>
+          ) : (
+            <div className="hidden md:flex items-center gap-4 text-[11px] text-ink-3">
+              <span className="flex items-center gap-1.5">
+                <span className="h-1.5 w-1.5 rounded-full bg-damm" />
+                Crítico
+              </span>
+              <span className="flex items-center gap-1.5">
+                <span className="h-1.5 w-1.5 rounded-full bg-gold" />
+                Atención
+              </span>
+              <span className="flex items-center gap-1.5">
+                <span className="h-1.5 w-1.5 rounded-full bg-moss" />
+                Positivo
+              </span>
+            </div>
+          )}
+          <span
+            className="flex h-6 w-6 items-center justify-center rounded-full text-ink-3 transition-colors hover:bg-ink/5 hover:text-ink"
+            aria-hidden
+          >
+            <ChevronDown
+              className={cn('h-3.5 w-3.5 transition-transform', collapsed && '-rotate-90')}
+              strokeWidth={2}
+            />
           </span>
-          <span className="flex items-center gap-1.5">
-            <span className="h-1.5 w-1.5 rounded-full bg-gold" />
-            Atención
-          </span>
-          <span className="flex items-center gap-1.5">
-            <span className="h-1.5 w-1.5 rounded-full bg-moss" />
-            Positivo
-          </span>
+          <span className="sr-only">{collapsed ? 'Expandir brief' : 'Contraer brief'}</span>
         </div>
-      </div>
+      </button>
 
       {/* Callouts grid */}
-      <div className={cn(
-        'grid divide-x divide-hairline',
-        data.callouts.length === 1 && 'grid-cols-1',
-        data.callouts.length === 2 && 'md:grid-cols-2',
-        data.callouts.length >= 3 && 'md:grid-cols-3',
-      )}>
-        {data.callouts.slice(0, 3).map((c, i) => (
-          <CalloutCell key={c.id} callout={c} index={i + 1} total={Math.min(data.callouts.length, 3)} />
-        ))}
-      </div>
+      {!collapsed && (
+        <div
+          id="brief-callouts"
+          className={cn(
+            'grid divide-x divide-hairline',
+            data.callouts.length === 1 && 'grid-cols-1',
+            data.callouts.length === 2 && 'md:grid-cols-2',
+            data.callouts.length >= 3 && 'md:grid-cols-3',
+          )}
+        >
+          {data.callouts.slice(0, 3).map((c, i) => (
+            <CalloutCell key={c.id} callout={c} index={i + 1} total={visibleCount} />
+          ))}
+        </div>
+      )}
     </section>
   );
 }
