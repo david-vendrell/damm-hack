@@ -102,7 +102,12 @@ function DrawerSection({ fila, isLast }: { fila: FilaPlan; isLast: boolean }) {
       )}
       {fila.feasReason && (
         <div className="mt-3 rounded-soft border border-damm/30 bg-damm-soft/40 px-3 py-2 text-xs text-damm-700">
-          {fila.feasReason}
+          <div className="font-medium">⚠ Conflicto con el calendario fijo</div>
+          <p className="mt-1">{fila.feasReason}</p>
+          <p className="mt-1.5 text-[11px] text-damm-700/80">
+            No puede correr este OF mientras la línea está en limpieza o mantenimiento.
+            El optimizador propone moverlo a otro slot — revisa las recomendaciones abajo.
+          </p>
         </div>
       )}
     </section>

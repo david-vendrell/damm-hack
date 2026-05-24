@@ -121,22 +121,25 @@ function Cell({
   borderTop?: boolean;
   onClick: () => void;
 }) {
-  // Maintenance / outage cell takes priority over content
+  // Empty slot with scheduled maintenance — the well-behaved case
   if (mant && filas.length === 0) {
     return (
       <div
         className={cn(
-          'hatch min-h-[68px] border-hairline px-2 py-2',
+          'hatch min-h-[60px] border-hairline px-2 py-2',
           borderLeft && 'border-l',
           borderTop && 'border-t-2 border-hairline-strong',
         )}
         title={mant.reason}
       >
-        <div className="eyebrow text-ink-3">🛠 {mant.event === 'LIMPIEZA' ? 'LIMP.' : mant.event === 'MANTENIMIENTO' ? 'MANT.' : 'OUTAGE'}</div>
+        <div className="eyebrow text-ink-3">
+          🛠 {mant.event === 'LIMPIEZA' ? 'LIMP.' : mant.event === 'MANTENIMIENTO' ? 'MANT.' : 'OUTAGE'}
+        </div>
       </div>
     );
   }
 
+  // Empty slot, no maintenance — nothing planned
   if (filas.length === 0) {
     return (
       <div
@@ -151,26 +154,44 @@ function Cell({
 
   const head = filas[0];
   const extra = filas.length - 1;
+  // CONFLICT: the planner scheduled OFs in a slot the CF Prat calendar
+  // reserves for cleaning. The plan is wrong on paper. Make it obvious.
+  const isConflict = !!mant;
 
   return (
     <button
       type="button"
       onClick={onClick}
       className={cn(
-        'group flex min-h-[60px] flex-col justify-center gap-0.5 border-hairline bg-surface px-2 py-1.5 text-left transition-colors hover:bg-linen',
+        'group flex min-h-[60px] flex-col justify-center gap-0.5 border-hairline px-2 py-1.5 text-left transition-colors',
         borderLeft && 'border-l',
         borderTop && 'border-t-2 border-hairline-strong',
+        isConflict
+          // Conflict: damm-tinted hatch background + ring, makes it impossible to miss
+          ? 'hatch bg-damm-soft/60 ring-1 ring-inset ring-damm/40 hover:bg-damm-soft'
+          : 'bg-surface hover:bg-linen',
       )}
-      aria-label={`${head.sku} en L${head.linea} ${head.dia}`}
+      title={isConflict ? `Conflicto: ${mant?.reason}` : undefined}
+      aria-label={`${head.sku} en L${head.linea} ${head.dia}${isConflict ? ' (conflicto con limpieza)' : ''}`}
     >
       <div className="flex items-start justify-between gap-1.5">
-        <span className="font-mono text-[11px] font-medium text-ink">{head.sku}</span>
+        <span className={cn(
+          'font-mono text-[11px] font-medium',
+          isConflict ? 'text-damm-700' : 'text-ink',
+        )}>
+          {head.sku}
+        </span>
         {extra > 0 && (
-          <span className="rounded-full bg-cream px-1.5 py-0.5 text-[10px] font-medium text-ink-3">
+          <span className="rounded-full bg-surface px-1.5 py-0.5 text-[10px] font-medium text-ink-3">
             +{extra}
           </span>
         )}
       </div>
+      {isConflict && (
+        <div className="eyebrow text-[9px] text-damm-700">
+          ⚠ Choca con {mant?.event === 'LIMPIEZA' ? 'limpieza' : mant?.event === 'MANTENIMIENTO' ? 'mant.' : 'outage'}
+        </div>
+      )}
     </button>
   );
 }
@@ -179,10 +200,14 @@ function Cell({
 
 function Leyenda() {
   return (
-    <div className="flex flex-wrap items-center gap-3 border-t border-hairline bg-cream/40 px-4 py-2 text-[11px] text-ink-3">
+    <div className="flex flex-wrap items-center gap-4 border-t border-hairline bg-cream/40 px-4 py-2 text-[11px] text-ink-3">
       <span className="inline-flex items-center gap-1.5">
         <span className="hatch inline-block h-3 w-4 rounded-sm border border-hairline" />
-        Mantenimiento / Limpieza programada
+        Limpieza / Mantenimiento programada (slot reservado)
+      </span>
+      <span className="inline-flex items-center gap-1.5">
+        <span className="hatch inline-block h-3 w-4 rounded-sm bg-damm-soft/60 ring-1 ring-inset ring-damm/40" />
+        <span className="text-damm-700">Conflicto: hay un OF planificado en un slot reservado</span>
       </span>
     </div>
   );
