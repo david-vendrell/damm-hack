@@ -277,6 +277,37 @@ def _priority_evict_plan() -> list[dict]:
     return rows
 
 
+def _replan_midweek() -> list[dict]:
+    """Plan spanning Mon-Fri with 2-3 OFs per día per línea, dense enough
+    that a Wednesday replan freezes a meaningful chunk while leaving the
+    rest of the week rearrangeable.
+
+    Combined with replan_from_ts=2026-05-27T10:00:00 (Wed mañana shift end)
+    and an outage on L17/Wed/T+N, the test asserts:
+      · frozen_count > 0    (Mon + Tue OFs pinned)
+      · n_changes ≥ 0       (the optimizer may or may not find improvements
+                             on the unfrozen remainder)
+      · all frozen OFs keep their original (línea, fecha, turno)
+    """
+    rows = []
+    seq = 1
+    # 3 OFs per día per línea — moderate density on Mon-Thu
+    pattern = [
+        (14, "ED13LTMW", 600), (14, "ED13LTW", 600), (14, "3BNEBL23", 500),
+        (17, "ED13LTW", 700), (17, "SK13LN", 600), (17, "VO13LTNN", 500),
+        (19, "FDL13LN", 700), (19, "ED12LTW", 900), (19, "EX12LB", 800),
+    ]
+    for d_idx in range(4):  # Mon-Thu
+        # Distribute the 3 SKUs per línea across M/T/N turnos
+        for (linea, sku, hl) in pattern:
+            # Pick turno by SKU index in this línea's group
+            seq_in_line = sum(1 for p in pattern[:pattern.index((linea, sku, hl))]
+                              if p[0] == linea)
+            turno = SHIFTS[seq_in_line % 3]
+            rows.append(_sku_row(linea, sku, DAYS[d_idx], turno, hl, seq)); seq += 1
+    return rows
+
+
 def write_xlsx(rows: list[dict], out_path: Path) -> None:
     df = pd.DataFrame(rows)
     df.to_excel(out_path, index=False, sheet_name="Planificado")
@@ -298,6 +329,7 @@ def main():
         ("08_outage_basico.xlsx",            _outage_basico),
         ("09_priority_holgado.xlsx",         _priority_holgado),
         ("10_priority_evict.xlsx",           _priority_evict_plan),
+        ("11_replan_midweek.xlsx",           _replan_midweek),
     ]
 
     for name, gen in plans:
