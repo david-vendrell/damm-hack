@@ -13,9 +13,11 @@
     "db:seed": "tsx prisma/seed.ts",
     "db:reset": "prisma migrate reset --force",
     "ingest": "tsx src/server/ingest.ts",
-    "test:parser": "tsx tests/parser.test.ts"
+    "test:parser": "tsx tests/parser.test.ts",
+    "sync:3d": "rsync -a --delete ../interactive-3d/ public/interactive-3d/"
   },
   "dependencies": {
+    "@anthropic-ai/vertex-sdk": "^0.16.1",
     "@duckdb/node-api": "^1.5.3-r.1",
     "@gradio/client": "^2.2.0",
     "@prisma/client": "^5.22.0",

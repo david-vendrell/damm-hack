@@ -31,11 +31,13 @@ import { BriefHero } from '@/components/brief-card';
 import { useScope } from '@/components/scope-provider';
 import { hl, pct } from '@/lib/utils';
 import type {
+  ChartConfig,
   Linea,
   ObservabilidadData,
   ObservabilidadDimensiones,
   SavedChartDTO,
 } from '@/types';
+import { AskBar } from './ask-bar';
 import { ChartBuilder } from './chart-builder';
 import { SavedChartsGrid } from './saved-charts-grid';
 
@@ -858,6 +860,17 @@ interface GraficosLayerProps {
 }
 
 function GraficosLayer({ editing, onEdit, onClearEdit }: GraficosLayerProps) {
+  const [proposedConfig, setProposedConfig] = useState<ChartConfig | null>(null);
+  const [proposalVersion, setProposalVersion] = useState(0);
+
+  const effectiveInitial = proposedConfig ?? editing?.config ?? null;
+
+  const handleProposed = (cfg: ChartConfig) => {
+    if (editing) onClearEdit();
+    setProposedConfig(cfg);
+    setProposalVersion((v) => v + 1);
+  };
+
   return (
     <div className="space-y-6">
       {/* Editorial header for the layer */}
@@ -868,7 +881,7 @@ function GraficosLayer({ editing, onEdit, onClearEdit }: GraficosLayerProps) {
             {editing ? `Editando · ${editing.nombre}` : 'Constructor de gráficos'}
           </h2>
           <p className="mt-1 text-xs text-ink-3">
-            Define una métrica, segmenta, filtra y guárdala en tu panel. La previa se actualiza al instante.
+            Pregunta en lenguaje natural o define la métrica a mano. La previa se actualiza al instante.
           </p>
         </div>
         {editing && (
@@ -881,12 +894,21 @@ function GraficosLayer({ editing, onEdit, onClearEdit }: GraficosLayerProps) {
         )}
       </div>
 
+      <AskBar currentConfig={effectiveInitial} onProposed={handleProposed} />
+
       <ChartBuilder
-        initialConfig={editing?.config ?? null}
+        key={editing?.id ?? `ask-${proposalVersion}`}
+        initialConfig={effectiveInitial}
         editingId={editing?.id ?? null}
         initialName={editing?.nombre ?? ''}
-        onSaved={() => onClearEdit()}
-        onCancelEdit={() => onClearEdit()}
+        onSaved={() => {
+          onClearEdit();
+          setProposedConfig(null);
+        }}
+        onCancelEdit={() => {
+          onClearEdit();
+          setProposedConfig(null);
+        }}
       />
 
       <SavedChartsGrid onEdit={onEdit} />
