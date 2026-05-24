@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { prisma } from '@/server/db';
-import { parseDiarioHl } from '@/server/parser';
+import { parsePlanningExcel } from '@/server/parser';
 import { analizarPlanConLineWise } from '@/server/analysis';
 
 export const runtime = 'nodejs';
@@ -16,10 +16,17 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: 'missing_file' }, { status: 400 });
   }
   const buf = Buffer.from(await file.arrayBuffer());
-  const parsed = parseDiarioHl(buf);
+  // Auto-detects Diario Hl Planif vs Planificado producciones formats
+  const parsed = parsePlanningExcel(buf);
   if (!parsed.length) {
     return NextResponse.json(
-      { error: 'empty_parse', detail: 'No se detectaron filas válidas en el Excel.' },
+      {
+        error: 'empty_parse',
+        detail:
+          'No se detectaron filas válidas. Comprueba que el Excel sea Diario Hl Planif ' +
+          'o Planificado producciones (columnas: Material, Tren, Fecha ini., Definición ' +
+          'de turno, Cntd plan).',
+      },
       { status: 400 },
     );
   }
