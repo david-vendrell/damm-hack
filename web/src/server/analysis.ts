@@ -2,10 +2,21 @@
 // modelo ML mañana. La UI nunca conoce la implementación: consume tipos.
 
 import { prisma } from './db';
+import {
+  callLineWise,
+  parseHeadlineOee,
+  parseDecomposicion,
+  parseDayTable,
+  parseBloqueosMant,
+  parseSwapTable,
+  type SwapRow,
+} from './linewise-client';
 import type {
   AccionUrgencia,
   AnalisisPlan,
   AnalisisUrgencia,
+  BloqueoMant,
+  CategoriaRecomendacion,
   FilaPlan,
   Linea,
   ModoUrgencia,
@@ -16,6 +27,7 @@ import type {
   RecomendacionSemana,
   SemanaPostMortem,
   TipoCambio,
+  Turno,
   Urgencia,
   Veredicto,
   WeekBrief,
@@ -781,6 +793,266 @@ export async function recomendarPlan(planId: string): Promise<PlanRecomendado> {
 
 function round3(n: number) {
   return Math.round(n * 1000) / 1000;
+}
+
+/* ─────────────────────────────────────────────────────────────────────
+ * LineWise model integration — primary path for /api/planes
+ *
+ * Strategy: always compute the heuristic AnalisisPlan first (it's fast
+ * and provides the structural skeleton: per-OF rows, recommendations,
+ * banderas). Then, in parallel, call the HF Space. When the Space
+ * responds, augment each FilaPlan with the model's OEE prediction +
+ * decomposition + drivers, and recompute the headline numbers.
+ *
+ * If the Space is unreachable or HF_TOKEN is missing, the heuristic
+ * result is returned as-is with meta.source='heuristic_fallback'.
+ * The UI shows a small amber badge when this happens.
+ * ───────────────────────────────────────────────────────────────────── */
+
+export async function analizarPlanConLineWise(
+  planId: string,
+  nombre: string,
+  items: RawItem[],
+  fileBuffer: Buffer,
+  fileName: string,
+): Promise<AnalisisPlan> {
+  // 1. Heuristic baseline (always runs — never blocks on the Space)
+  const base = await analizarPlan(planId, nombre, items);
+
+  // 2. Try the LineWise model in parallel with the heuristic
+  const lw = await callLineWise(fileBuffer, fileName, { aggressive: false });
+  if (!lw) {
+    return {
+      ...base,
+      meta: {
+        source: 'heuristic_fallback',
+        warning: 'Modelo LineWise no disponible (sin HF_TOKEN o Space offline). Predicciones por heurística local.',
+      },
+    };
+  }
+
+  // 3. Extract model headline + per-día numbers from the response
+  const headline = parseHeadlineOee(lw.summary_md);
+  const decomp   = parseDecomposicion(lw.summary_md);
+  const dayRows  = parseDayTable(lw.day_tbl);
+  const bloqueos = parseBloqueosMant(dayRows) as BloqueoMant[];
+
+  const totalHl = base.filas.reduce((acc, f) => acc + f.hlPlan, 0);
+
+  // 4. Annotate each FilaPlan with the model's bloqueo info (when applicable),
+  //    but KEEP the heuristic per-OF veredicto (which varies by SKU/línea/
+  //    cambio). The model's headline OEE is factory-wide, not per-OF, so
+  //    forcing every OF to that single number gave them all the same flag.
+  //    For per-OF model predictions we'd need to call /predict — deferred.
+  const filasAug: FilaPlan[] = base.filas.map((f) => {
+    const feasReasonBloqueo = matchFeasReason(f, bloqueos);
+    if (feasReasonBloqueo) {
+      // OF lands on a blocked slot — override to evitar with the explicit reason
+      return {
+        ...f,
+        veredicto: 'evitar' as Veredicto,
+        feasReason: feasReasonBloqueo,
+        motivo: feasReasonBloqueo,
+      };
+    }
+    return f;
+  });
+
+  // 5. Recompute banderas + headline numbers from the augmented rows
+  const banderas = { evitar: 0, revisar: 0, procede: 0 };
+  for (const f of filasAug) banderas[f.veredicto]++;
+  // `Plan actual` from the markdown = the model's baseline OEE for the input
+  // plan (what we want to show as the prediction). `Plan optimizado` = what
+  // the optimizer projects after applying all its proposed swaps — that's
+  // the upper-bound used for the recomendaciones panel comparator.
+  const oeeBaseline   = headline.actual     ?? base.oeePrevistoPlan;
+  const oeeOptimizado = headline.optimizado ?? oeeBaseline;
+
+  // 6. Build the embedded PlanRecomendado from the optimizer's swap_log.
+  //    `Plan actual` in summary_md is the model's baseline prediction;
+  //    `Plan optimizado` is what the optimizer achieves after applying every
+  //    swap. The diff = total ganancia. Avoids a second round-trip from the
+  //    frontend to /api/planes/[id]/recomendaciones (which only has heuristics).
+  const swapRows = parseSwapTable(lw.swap_tbl);
+  const planRecomendado = buildPlanRecomendadoFromSwapLog(
+    swapRows,
+    oeeBaseline,
+    oeeOptimizado,
+  );
+  const filasOptimizadas = applyOptimizerSwapsToFilas(filasAug, swapRows);
+
+  return {
+    ...base,
+    filas: filasAug,
+    oeePrevistoPlan: round3(oeeBaseline),
+    banderas,
+    // p10/p90 aren't given by /optimize_v3 — heuristic widening for now;
+    // a future iteration could call /predict in parallel for true quantiles.
+    oeeP10Plan: round3(Math.max(0.1, oeeBaseline - 0.10)),
+    oeeP90Plan: round3(Math.min(0.95, oeeOptimizado + 0.05)),
+    decomposicion: decomp,
+    bloqueosMant: bloqueos,
+    totalHl,
+    meta: { source: 'linewise', via: lw.via, spaceLatencyMs: lw.latencyMs },
+    planRecomendado,
+    filasOptimizadas,
+  };
+}
+
+/**
+ * Materialize the "plan optimizado" view of the OFs by applying each swap
+ * from the optimizer's swap_log to a copy of the input filas. Each swap
+ * row carries (sku, fromLinea/Dia/Turno) → (toLinea/Dia/Turno); we find
+ * the matching OF and update its slot. When multiple OFs match the source
+ * slot (same SKU same shift), the first unswapped one is picked.
+ *
+ * Approximation, but visually faithful: the resulting per-cell content of
+ * the calendar reflects exactly which OF the optimizer recommends placing
+ * where. Priority inserts (from === null) get a synthetic OF added.
+ */
+function applyOptimizerSwapsToFilas(filas: FilaPlan[], swaps: SwapRow[]): FilaPlan[] {
+  const copy = filas.map((f) => ({ ...f }));
+  const swapped = new Set<string>();   // block_ids already moved (don't double-move)
+
+  for (const swap of swaps) {
+    // Priority insert (no source slot) → append a synthetic OF
+    if (!swap.fromLinea && swap.toLinea) {
+      copy.push({
+        of: `PRIO-${swap.sku}-${swap.toDia}`,
+        linea: swap.toLinea,
+        secuencia: copy.length + 1,
+        dia: swap.toDia ?? '',
+        turno: swap.toTurno ?? undefined,
+        sku: swap.sku,
+        nombre: swap.sku,
+        hlPlan: 0,
+        skuAnterior: null,
+        tipoCambio: 'inicio',
+        oeePrevisto: 0,
+        veredicto: 'procede',
+        motivo: swap.descripcion,
+      });
+      continue;
+    }
+    // Eviction (no target slot) → drop the OF from the materialized view
+    if (swap.fromLinea && !swap.toLinea) {
+      const idx = copy.findIndex(
+        (f) =>
+          !swapped.has(f.of) &&
+          f.sku === swap.sku &&
+          f.linea === swap.fromLinea &&
+          f.dia === swap.fromDia &&
+          (!swap.fromTurno || !f.turno || f.turno === swap.fromTurno),
+      );
+      if (idx >= 0) {
+        swapped.add(copy[idx].of);
+        copy.splice(idx, 1);
+      }
+      continue;
+    }
+    // Normal move
+    const idx = copy.findIndex(
+      (f) =>
+        !swapped.has(f.of) &&
+        f.sku === swap.sku &&
+        f.linea === swap.fromLinea &&
+        f.dia === swap.fromDia &&
+        (!swap.fromTurno || !f.turno || f.turno === swap.fromTurno),
+    );
+    if (idx >= 0) {
+      swapped.add(copy[idx].of);
+      const moved = copy[idx];
+      if (swap.toLinea) moved.linea = swap.toLinea;
+      if (swap.toDia)   moved.dia   = swap.toDia;
+      if (swap.toTurno) moved.turno = swap.toTurno;
+      // The maintenance-conflict reason was about the ORIGINAL slot. After
+      // the optimizer moves the OF out, the warning no longer applies.
+      moved.feasReason = undefined;
+      // Veredicto also defaults back to procede; if the new slot is still
+      // problematic that would have been caught when re-scoring the plan,
+      // but for the calendar display the obvious "this was moved here" is
+      // the operational truth.
+      moved.veredicto = 'procede';
+    }
+  }
+  return copy;
+}
+
+/** Turn the optimizer's per-move swap log into the Recomendacion shape the
+ *  existing RecomendacionesPanel renders. Each move becomes one recommendation. */
+function buildPlanRecomendadoFromSwapLog(
+  swaps: SwapRow[],
+  oeeOriginal: number,
+  oeeOptimizado: number,
+): PlanRecomendado {
+  const recomendaciones: Recomendacion[] = swaps.map((s, i) => {
+    // Classify under the existing 3 buckets so the RecomendacionesPanel
+    // styling keeps working: línea change → mover_linea; día change → reprogramar;
+    // turno-only change → reordenar.
+    let tipo: Recomendacion['tipo'] = 'reordenar';
+    if (s.fromLinea !== null && s.toLinea !== null && s.fromLinea !== s.toLinea) tipo = 'mover_linea';
+    else if (s.fromDia !== null && s.toDia !== null && s.fromDia !== s.toDia)    tipo = 'reprogramar';
+
+    const fromLabel = s.fromLinea
+      ? `L${s.fromLinea} ${s.fromDia ?? ''} ${s.fromTurno ?? ''}`.trim()
+      : 'inserción';
+    const toLabel = s.toLinea
+      ? `L${s.toLinea} ${s.toDia ?? ''} ${s.toTurno ?? ''}`.trim()
+      : 'desplazado';
+
+    const titulo = (s.categoria === 'prioritario')
+      ? `Insertar ${s.sku} en ${toLabel}`
+      : (s.categoria === 'desplazado')
+        ? `Desplazar ${s.sku} de ${fromLabel}`
+        : `Mover ${s.sku}: ${fromLabel} → ${toLabel}`;
+
+    return {
+      id: `opt-${i}-${s.sku}`,
+      tipo,
+      titulo,
+      descripcion: s.descripcion,
+      skusAfectados: [s.sku],
+      gananciaPts: s.gananciaPts,
+      categoria: s.categoria as CategoriaRecomendacion,
+      deltaCambioMin: s.deltaCambioMin,
+      deltaMantHoras: s.deltaMantHoras,
+      agrupaFormato: s.agrupaFormato,
+      antes:   { linea: (s.fromLinea ?? 14) as Linea, secuencia: [fromLabel] },
+      despues: { linea: (s.toLinea   ?? s.fromLinea ?? 14) as Linea, secuencia: [toLabel] },
+    };
+  });
+
+  // Sort: required first (operator must apply these), then optional sorted by ganancia desc
+  recomendaciones.sort((a, b) => {
+    const aReq = a.categoria === 'obligatorio' || a.categoria === 'prioritario' || a.categoria === 'desplazado' || a.categoria === 'realojo';
+    const bReq = b.categoria === 'obligatorio' || b.categoria === 'prioritario' || b.categoria === 'desplazado' || b.categoria === 'realojo';
+    if (aReq !== bReq) return aReq ? -1 : 1;
+    return b.gananciaPts - a.gananciaPts;
+  });
+
+  return {
+    oeePlanOriginal:     round3(oeeOriginal),
+    oeePlanRecomendado:  round3(oeeOptimizado),
+    gananciaPts:         Math.round((oeeOptimizado - oeeOriginal) * 100 * 10) / 10,
+    recomendaciones,
+    source: 'linewise',
+  };
+}
+
+function isOnBlock(f: FilaPlan, bloqueos: BloqueoMant[]): boolean {
+  return bloqueos.some(
+    (b) => b.linea === f.linea && b.dia === f.dia && (!f.turno || b.turno === f.turno),
+  );
+}
+
+function matchFeasReason(f: FilaPlan, bloqueos: BloqueoMant[]): string | undefined {
+  const b = bloqueos.find(
+    (x) => x.linea === f.linea && x.dia === f.dia && (!f.turno || x.turno === f.turno),
+  );
+  if (!b) return undefined;
+  // b.reason already reads "LIMPIEZA programada en L17 (2026-05-18)" — don't
+  // double-wrap it. Just prepend the "Slot bloqueado:" tag.
+  return `Slot bloqueado · ${b.event} en L${b.linea} ${b.dia} turno ${b.turno}`;
 }
 
 // ============================================================

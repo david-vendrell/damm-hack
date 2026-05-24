@@ -232,8 +232,17 @@ def optimize_plan_v3(
             chains.setdefault(sid, []).append(jid)
         # Order each chain: baseline rows by start_ts, priority OFs appended last
         # (priority OFs have synthetic secuencia 9000+ already).
+        def _seq_int(v) -> int:
+            # Defensive against pd.NA / NaN coming from the Diario Hl parser:
+            # `pd.NA or 0` raises 'boolean value of NA is ambiguous'.
+            if v is None or (isinstance(v, float) and v != v) or pd.isna(v):
+                return 0
+            try:
+                return int(v)
+            except (TypeError, ValueError):
+                return 0
         order_index = {str(r["block_id"]): (pd.Timestamp(r["start_ts"]),
-                                            int(r.get("secuencia", 0) or 0))
+                                            _seq_int(r.get("secuencia")))
                        for _, r in blocks.iterrows()}
         for sid, chain in chains.items():
             def _k(jid):

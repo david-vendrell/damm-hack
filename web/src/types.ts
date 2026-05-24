@@ -77,11 +77,19 @@ export interface WeekBrief {
   recomendaciones: RecomendacionSemana[];
 }
 
+export interface ShapDriver {
+  name: string;        // feature name (e.g. 'prev_oee', 'changeover_variance_min')
+  shap: number;        // signed contribution: positive = pushed OEE up, negative = down
+}
+
+export type Turno = 'M' | 'T' | 'N';
+
 export interface FilaPlan {
   of: string;
   linea: Linea;
   secuencia: number;
   dia: string;
+  turno?: Turno;            // optional: present when source plan carries shifts
   sku: string;
   nombre: string;
   hlPlan: number;
@@ -90,6 +98,29 @@ export interface FilaPlan {
   oeePrevisto: number;
   veredicto: Veredicto;
   motivo: string;
+  // ---- LineWise model fields (present when meta.source === 'linewise') ----
+  oeeP10?: number;          // pessimistic floor
+  oeeP90?: number;          // achievable ceiling
+  disp?: number;            // Disponibilidad (Damm formula)
+  rend?: number;            // Rendimiento
+  cal?: number;             // Calidad
+  topDrivers?: ShapDriver[];// top SHAP features for this OF's p50 prediction
+  feasReason?: string;      // explicit infeasibility reason from the parser
+  cambioTeoricoMin?: number;// theoretical changeover minutes from CF Prat matrix
+}
+
+export interface BloqueoMant {
+  linea: Linea;
+  dia: string;              // ISO yyyy-mm-dd
+  turno: Turno;
+  event: 'LIMPIEZA' | 'MANTENIMIENTO' | 'OUTAGE';
+  reason: string;           // human-readable Spanish for the UI
+}
+
+export interface DecomposicionOEE {
+  disp: number;
+  rend: number;
+  cal: number;
 }
 
 export interface AnalisisPlan {
@@ -99,7 +130,33 @@ export interface AnalisisPlan {
   perdidaEvitablePts: number;
   banderas: { evitar: number; revisar: number; procede: number };
   filas: FilaPlan[];
+  // ---- LineWise model headline fields (present when meta.source === 'linewise') ----
+  oeeP10Plan?: number;
+  oeeP90Plan?: number;
+  decomposicion?: DecomposicionOEE;
+  bloqueosMant?: BloqueoMant[];
+  totalHl?: number;
+  meta?: {
+    source: 'linewise' | 'heuristic_fallback';
+    via?: 'local' | 'hf_space';      // which backend served the LineWise call
+    spaceLatencyMs?: number;
+    warning?: string;       // shown as small amber badge in the UI when fallback fires
+  };
+  // Optimizer's recommendations + headline (populated when meta.source==='linewise').
+  // Lets the frontend skip the secondary /api/planes/[id]/recomendaciones fetch.
+  planRecomendado?: PlanRecomendado;
+  // Same FilaPlan list but with the optimizer's swaps APPLIED. Used by the
+  // calendar to switch between "plan original" and "plan optimizado" views
+  // when the planner accepts the recommendations.
+  filasOptimizadas?: FilaPlan[];
 }
+
+export type CategoriaRecomendacion =
+  | 'obligatorio'      // 🔧 forced by an incident (blocked slot)
+  | 'opcional'         // 💡 pure OEE improvement, planner may decline
+  | 'prioritario'      // ⭐ caller-injected priority OF
+  | 'desplazado'       // ⚠️ evicted by a priority insert
+  | 'realojo';         // ↪️ displaced OF re-assigned
 
 export interface Recomendacion {
   id: string;
@@ -108,6 +165,12 @@ export interface Recomendacion {
   descripcion: string;
   skusAfectados: string[];
   gananciaPts: number;
+  // ---- Optimizer extras (present when the recommendation came from
+  //      LineWise /optimize_v3 instead of the heuristic recomendarPlan) ----
+  categoria?: CategoriaRecomendacion;
+  deltaCambioMin?: number;      // negative = ahorro de minutos de cambio
+  deltaMantHoras?: number;      // positive = se aleja de mantenimiento
+  agrupaFormato?: boolean;
   antes: { linea: Linea; secuencia: string[] };
   despues: { linea: Linea; secuencia: string[] };
 }
@@ -117,6 +180,8 @@ export interface PlanRecomendado {
   oeePlanRecomendado: number;
   gananciaPts: number;
   recomendaciones: Recomendacion[];
+  // ---- Optimizer metadata (only present when source === 'linewise') ----
+  source?: 'linewise' | 'heuristic_fallback';
 }
 
 export interface SkuLineaInfo {
