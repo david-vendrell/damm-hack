@@ -1,0 +1,1222 @@
+<!doctype html>
+<html lang="es">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>LineWise · DAMM × Engineering HUB Hackathon</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght,SOFT@9..144,300..600,0..100&family=Geist:wght@300;400;500;600&family=Geist+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+  <style>
+    /* ──────────────────────────────────────────────────────────────
+       TOKENS — Damm gaceta · cream paper, red ink, hairline rules
+       ────────────────────────────────────────────────────────────── */
+    :root {
+      --paper:        #F2EDE2;
+      --paper-2:      #EAE3D2;
+      --paper-3:      #DFD6C0;
+      --ink:          #16110D;
+      --ink-soft:     #5A5249;
+      --ink-faint:    #8F877B;
+      --hair:         #C9BFA7;
+      --hair-soft:    #DBD2BC;
+      --damm:         #A4161A;
+      --damm-deep:    #6F0F12;
+      --damm-soft:    rgba(164,22,26,0.08);
+      --copper:       #B8895A;
+
+      --display:      'Fraunces', 'Times New Roman', serif;
+      --body:         'Geist', system-ui, sans-serif;
+      --mono:         'Geist Mono', 'JetBrains Mono', ui-monospace, monospace;
+
+      --ease-paper:   cubic-bezier(0.65, 0, 0.05, 1);
+      --ease-out:     cubic-bezier(0.16, 1, 0.3, 1);
+      --ease-quint:   cubic-bezier(0.83, 0, 0.17, 1);
+
+      --rail-pad-x:   clamp(28px, 3.2vw, 56px);
+      --rail-pad-y:   clamp(20px, 2.2vh, 32px);
+    }
+
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    html, body {
+      height: 100%; width: 100%; overflow: hidden;
+      background: var(--paper);
+      color: var(--ink);
+      font-family: var(--body);
+      font-size: 18px;
+      line-height: 1.6;
+      font-feature-settings: 'ss01' 1, 'cv11' 1;
+    }
+
+    /* paper grain — very faint, multiply on cream */
+    body::before {
+      content: '';
+      position: fixed; inset: 0;
+      pointer-events: none; z-index: 1;
+      background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='240' height='240'><filter id='n'><feTurbulence type='fractalNoise' baseFrequency='0.85' numOctaves='2' stitchTiles='stitch'/><feColorMatrix type='matrix' values='0 0 0 0 0.05 0 0 0 0 0.04 0 0 0 0 0.03 0 0 0 0.55 0'/></filter><rect width='100%' height='100%' filter='url(%23n)' opacity='1'/></svg>");
+      mix-blend-mode: multiply;
+      opacity: 0.18;
+    }
+
+    /* custom crosshair cursor, Damm red */
+    body {
+      cursor: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='28' height='28' viewBox='0 0 28 28'><circle cx='14' cy='14' r='6.5' fill='none' stroke='%23A4161A' stroke-width='1'/><line x1='14' y1='1' x2='14' y2='6' stroke='%23A4161A' stroke-width='1'/><line x1='14' y1='22' x2='14' y2='27' stroke='%23A4161A' stroke-width='1'/><line x1='1' y1='14' x2='6' y2='14' stroke='%23A4161A' stroke-width='1'/><line x1='22' y1='14' x2='27' y2='14' stroke='%23A4161A' stroke-width='1'/></svg>") 14 14, auto;
+    }
+
+    ::selection { background: var(--damm); color: var(--paper); }
+
+    /* ──────────────────────────────────────────────────────────────
+       DECK + RAILS
+       ────────────────────────────────────────────────────────────── */
+    .deck {
+      position: fixed; inset: 0;
+      z-index: 2;
+    }
+
+    .rail {
+      position: fixed; left: 0; right: 0;
+      padding: var(--rail-pad-y) var(--rail-pad-x);
+      z-index: 30;
+      display: flex; justify-content: space-between; align-items: center;
+      pointer-events: none;
+    }
+    .rail > * { pointer-events: auto; }
+    .rail.top { top: 0; }
+    .rail.bottom { bottom: 0; }
+
+    .brand {
+      display: flex; align-items: baseline; gap: 14px;
+      font-family: var(--mono);
+      font-size: 11px;
+      letter-spacing: 0.18em;
+      text-transform: uppercase;
+      color: var(--ink-soft);
+    }
+    .brand .damm {
+      font-family: var(--display);
+      font-style: italic; font-weight: 600;
+      font-size: 24px;
+      letter-spacing: -0.02em;
+      color: var(--damm);
+      text-transform: none;
+      line-height: 1;
+      font-variation-settings: 'opsz' 60, 'SOFT' 30;
+    }
+    .brand .star {
+      display: inline-block;
+      width: 12px; height: 12px;
+      margin: 0 4px;
+      background: var(--damm);
+      clip-path: polygon(50% 0, 61% 35%, 98% 35%, 68% 57%, 79% 91%, 50% 70%, 21% 91%, 32% 57%, 2% 35%, 39% 35%);
+      transform: translateY(2px);
+    }
+
+    .counter {
+      font-family: var(--mono);
+      font-size: 11px;
+      letter-spacing: 0.18em;
+      text-transform: uppercase;
+      color: var(--ink-soft);
+      text-align: right;
+      line-height: 1.5;
+    }
+    .counter .now {
+      color: var(--ink); font-weight: 500;
+      font-variant-numeric: tabular-nums;
+    }
+    .counter .of { color: var(--ink-faint); }
+    .counter .title {
+      display: block; margin-top: 4px;
+      color: var(--damm); font-weight: 500;
+    }
+
+    .progress {
+      display: flex; align-items: center; gap: 14px;
+      font-family: var(--mono); font-size: 10px;
+      color: var(--ink-soft); letter-spacing: 0.18em;
+      text-transform: uppercase;
+    }
+    .progress .marks {
+      display: flex; gap: 10px;
+    }
+    .progress .mark {
+      width: 22px; height: 1px;
+      background: var(--hair);
+      transition: background .3s ease, height .3s ease;
+    }
+    .progress .mark.done { background: var(--ink-soft); }
+    .progress .mark.cur  { background: var(--damm); height: 2px; }
+
+    .hint {
+      font-family: var(--mono);
+      font-size: 10px;
+      letter-spacing: 0.18em;
+      text-transform: uppercase;
+      color: var(--ink-faint);
+    }
+    .hint kbd {
+      font-family: var(--mono);
+      display: inline-block;
+      padding: 2px 6px;
+      border: 1px solid var(--hair);
+      border-radius: 2px;
+      color: var(--ink-soft);
+      background: var(--paper-2);
+      font-size: 9.5px;
+      margin: 0 1px;
+    }
+
+    /* registration crosshair, decorative */
+    .reg {
+      position: fixed; z-index: 25; pointer-events: none;
+      width: 26px; height: 26px;
+    }
+    .reg.tl { top: 14px; left: 14px; }
+    .reg.tr { top: 14px; right: 14px; }
+    .reg.bl { bottom: 14px; left: 14px; }
+    .reg.br { bottom: 14px; right: 14px; }
+    .reg svg { width: 100%; height: 100%; }
+
+    /* click affordances for next/prev (invisible) */
+    .nav-zone {
+      position: fixed; top: 80px; bottom: 80px;
+      width: 30vw; z-index: 5;
+      cursor: w-resize;
+    }
+    .nav-zone.next { right: 0; cursor: e-resize; }
+    .nav-zone.prev { left: 0; }
+
+    /* ──────────────────────────────────────────────────────────────
+       SLIDES
+       ────────────────────────────────────────────────────────────── */
+    .slide {
+      position: fixed; inset: 0;
+      padding: clamp(80px, 9vh, 110px) clamp(56px, 6vw, 110px);
+      display: flex; flex-direction: column;
+      justify-content: center;
+      opacity: 0; visibility: hidden;
+      transition: opacity .35s ease, visibility .35s ease;
+      z-index: 10;
+    }
+    .slide.active { opacity: 1; visibility: visible; z-index: 15; }
+
+    .slide-inner {
+      width: 100%;
+      max-width: 1400px;
+      margin: 0 auto;
+    }
+
+    /* ── reveal primitives ───────────────────────────────────────── */
+    .word { display: inline-block; overflow: hidden; vertical-align: top; line-height: 1; padding-bottom: 0.18em; margin-bottom: -0.18em; }
+    .word-i {
+      display: inline-block;
+      transform: translateY(110%);
+      transition: transform 0.9s var(--ease-out);
+      transition-delay: var(--d, 0ms);
+    }
+    .slide.active .word-i { transform: translateY(0); }
+
+    .rise {
+      opacity: 0; transform: translateY(14px);
+      transition: opacity .7s var(--ease-out), transform .7s var(--ease-out);
+      transition-delay: var(--d, 0ms);
+    }
+    .slide.active .rise { opacity: 1; transform: none; }
+
+    .fade {
+      opacity: 0;
+      transition: opacity .7s var(--ease-out);
+      transition-delay: var(--d, 0ms);
+    }
+    .slide.active .fade { opacity: 1; }
+
+    .draw-h {
+      transform: scaleX(0); transform-origin: left;
+      transition: transform 1.05s var(--ease-paper);
+      transition-delay: var(--d, 0ms);
+    }
+    .slide.active .draw-h { transform: scaleX(1); }
+
+    .draw-v {
+      transform: scaleY(0); transform-origin: top;
+      transition: transform 1.05s var(--ease-paper);
+      transition-delay: var(--d, 0ms);
+    }
+    .slide.active .draw-v { transform: scaleY(1); }
+
+    .stamp {
+      opacity: 0; transform: rotate(-3deg) scale(0.92);
+      transition: opacity .6s var(--ease-out), transform .6s var(--ease-out);
+      transition-delay: var(--d, 0ms);
+    }
+    .slide.active .stamp { opacity: 1; transform: rotate(-1deg) scale(1); }
+
+    /* ── shared typography ───────────────────────────────────────── */
+    .eyebrow {
+      font-family: var(--mono);
+      font-size: clamp(11px, 0.85vw, 13px);
+      letter-spacing: 0.24em;
+      text-transform: uppercase;
+      color: var(--damm);
+      font-weight: 500;
+      display: inline-flex; align-items: center; gap: 14px;
+    }
+    .eyebrow::before {
+      content: '';
+      display: inline-block;
+      width: 28px; height: 1px; background: var(--damm);
+    }
+
+    h1.display {
+      font-family: var(--display);
+      font-style: italic;
+      font-weight: 500;
+      font-variation-settings: 'opsz' 144, 'SOFT' 30;
+      font-size: clamp(56px, 9vw, 152px);
+      line-height: 0.95;
+      letter-spacing: -0.025em;
+      color: var(--ink);
+    }
+    h1.display .accent { color: var(--damm); }
+
+    h2.headline {
+      font-family: var(--display);
+      font-style: italic;
+      font-weight: 500;
+      font-variation-settings: 'opsz' 96, 'SOFT' 40;
+      font-size: clamp(36px, 4.6vw, 76px);
+      line-height: 1.05;
+      letter-spacing: -0.018em;
+      color: var(--ink);
+      max-width: 22ch;
+    }
+    h2.headline em { font-style: italic; color: var(--damm-deep); }
+
+    p.body {
+      font-size: clamp(17px, 1.25vw, 22px);
+      line-height: 1.55;
+      color: var(--ink-soft);
+      max-width: 60ch;
+    }
+    p.body strong { color: var(--ink); font-weight: 500; }
+
+    .small-mono {
+      font-family: var(--mono);
+      font-size: clamp(10px, 0.85vw, 12px);
+      letter-spacing: 0.18em;
+      text-transform: uppercase;
+      color: var(--ink-soft);
+    }
+
+    /* ──────────────────────────────────────────────────────────────
+       SLIDE 1 · COVER
+       ────────────────────────────────────────────────────────────── */
+    #s1 { justify-content: flex-end; }
+    #s1 .meta-top {
+      position: absolute; top: var(--rail-pad-y); left: var(--rail-pad-x);
+      right: var(--rail-pad-x);
+      padding-top: 50px;
+      display: flex; justify-content: space-between; gap: 24px;
+      font-family: var(--mono); font-size: 11px;
+      letter-spacing: 0.18em; text-transform: uppercase;
+      color: var(--ink-soft);
+    }
+    #s1 .meta-top b { color: var(--ink); font-weight: 500; }
+    #s1 .meta-top .right { text-align: right; line-height: 1.6; }
+
+    #s1 .stack {
+      padding-bottom: 40px;
+    }
+    #s1 .deck-eyebrow {
+      font-family: var(--mono);
+      font-size: clamp(12px, 0.95vw, 14px);
+      letter-spacing: 0.3em;
+      text-transform: uppercase;
+      color: var(--damm);
+      margin-bottom: 28px;
+      display: flex; align-items: center; gap: 16px;
+    }
+    #s1 .deck-eyebrow .rule {
+      flex: 0 0 80px; height: 1px; background: var(--damm);
+      transform-origin: left;
+    }
+
+    #s1 h1 {
+      font-family: var(--display);
+      font-style: italic; font-weight: 500;
+      font-variation-settings: 'opsz' 144, 'SOFT' 40;
+      font-size: clamp(96px, 17vw, 320px);
+      line-height: 0.86;
+      letter-spacing: -0.03em;
+      color: var(--ink);
+      margin-bottom: 28px;
+    }
+    #s1 h1 .w { display: inline-block; }
+    #s1 h1 .accent { color: var(--damm); font-style: italic; }
+
+    #s1 .tagline {
+      font-family: var(--display);
+      font-style: italic; font-weight: 400;
+      font-variation-settings: 'opsz' 72, 'SOFT' 50;
+      font-size: clamp(22px, 2vw, 32px);
+      line-height: 1.35;
+      color: var(--ink-soft);
+      max-width: 28ch;
+      margin-top: 16px;
+    }
+
+    #s1 .baseline {
+      position: absolute;
+      left: var(--rail-pad-x); right: var(--rail-pad-x);
+      bottom: calc(var(--rail-pad-y) + 56px);
+      display: flex; justify-content: space-between; align-items: flex-end;
+      gap: 32px;
+    }
+    #s1 .baseline .h {
+      flex: 1; height: 1px; background: var(--hair);
+      margin-bottom: 14px; align-self: center;
+      transform-origin: left;
+    }
+    #s1 .baseline .label {
+      font-family: var(--mono); font-size: 11px;
+      letter-spacing: 0.22em; text-transform: uppercase;
+      color: var(--ink-soft);
+      text-align: right; line-height: 1.6;
+      white-space: nowrap;
+    }
+
+    /* ──────────────────────────────────────────────────────────────
+       SLIDE 2 · PREMISA — typographic punch
+       ────────────────────────────────────────────────────────────── */
+    #s2 .inner-2 {
+      display: grid;
+      grid-template-columns: 1fr;
+      gap: 48px;
+    }
+    #s2 .premise-block {
+      font-family: var(--display);
+      font-style: italic; font-weight: 400;
+      font-variation-settings: 'opsz' 96, 'SOFT' 40;
+      font-size: clamp(40px, 5.2vw, 86px);
+      line-height: 1.1;
+      letter-spacing: -0.015em;
+      color: var(--ink);
+    }
+    #s2 .premise-block .num {
+      font-family: var(--mono);
+      font-style: normal;
+      font-weight: 500;
+      font-size: clamp(56px, 7.2vw, 130px);
+      color: var(--damm);
+      letter-spacing: -0.03em;
+      font-variant-numeric: tabular-nums;
+      display: inline-block;
+      transform: translateY(0.04em);
+    }
+    #s2 .premise-block .sep {
+      display: inline-block;
+      width: clamp(40px, 6vw, 100px);
+      height: 1px;
+      background: var(--damm);
+      vertical-align: middle;
+      margin: 0 clamp(14px, 1.4vw, 26px);
+      transform-origin: left;
+    }
+    #s2 .premise-block .ink { color: var(--ink); font-style: italic; }
+    #s2 .premise-block .soft { color: var(--ink-soft); }
+
+    #s2 .premise-note {
+      font-family: var(--body);
+      font-size: clamp(15px, 1.1vw, 19px);
+      color: var(--ink-soft);
+      letter-spacing: 0.01em;
+      max-width: 70ch;
+      padding-left: clamp(0px, 4vw, 80px);
+      border-left: 1px solid var(--hair);
+      padding-top: 6px; padding-bottom: 6px;
+      line-height: 1.6;
+    }
+
+    /* ──────────────────────────────────────────────────────────────
+       SLIDE 3 · CONTEXTO
+       ────────────────────────────────────────────────────────────── */
+    #s3 .grid-3 {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: clamp(40px, 5vw, 90px);
+      align-items: start;
+      margin-top: 36px;
+    }
+    #s3 .data-strip {
+      display: grid;
+      grid-template-columns: repeat(2, 1fr);
+      gap: 0;
+      border-top: 1px solid var(--hair);
+      margin-top: 32px;
+    }
+    #s3 .data-cell {
+      padding: 18px 24px 18px 0;
+      border-right: 1px solid var(--hair);
+      border-bottom: 1px solid var(--hair);
+    }
+    #s3 .data-cell:nth-child(even) { padding-right: 0; padding-left: 24px; border-right: none; }
+    #s3 .data-cell:nth-last-child(-n+2) { border-bottom: none; }
+    #s3 .data-cell .v {
+      font-family: var(--display);
+      font-style: italic; font-weight: 500;
+      font-variation-settings: 'opsz' 96, 'SOFT' 40;
+      font-size: clamp(34px, 3.6vw, 56px);
+      line-height: 1; letter-spacing: -0.01em;
+      color: var(--ink);
+      font-feature-settings: 'tnum' 1;
+    }
+    #s3 .data-cell .l {
+      font-family: var(--mono);
+      font-size: 11px;
+      letter-spacing: 0.18em; text-transform: uppercase;
+      color: var(--ink-soft);
+      margin-top: 10px;
+    }
+
+    /* ──────────────────────────────────────────────────────────────
+       SLIDE 4 · CAUSAS — 5 numbered items
+       ────────────────────────────────────────────────────────────── */
+    #s4 .causes-grid {
+      margin-top: 30px;
+      display: grid;
+      grid-template-columns: 1fr;
+      gap: 0;
+    }
+    .cause {
+      display: grid;
+      grid-template-columns: 80px 1fr;
+      gap: 28px;
+      padding: 22px 0;
+      align-items: start;
+      border-bottom: 1px solid var(--hair);
+    }
+    .cause:first-of-type { border-top: 1px solid var(--hair); }
+    .cause .num {
+      font-family: var(--display);
+      font-style: italic; font-weight: 500;
+      font-variation-settings: 'opsz' 72, 'SOFT' 40;
+      font-size: clamp(34px, 3.5vw, 56px);
+      color: var(--damm);
+      line-height: 1;
+      font-feature-settings: 'tnum' 1;
+    }
+    .cause .body-c { padding-top: 6px; }
+    .cause .h {
+      font-family: var(--body);
+      font-weight: 500;
+      font-size: clamp(18px, 1.3vw, 24px);
+      line-height: 1.3;
+      color: var(--ink);
+      margin-bottom: 4px;
+    }
+    .cause .d {
+      font-size: clamp(14px, 1.05vw, 18px);
+      line-height: 1.55;
+      color: var(--ink-soft);
+      max-width: 80ch;
+    }
+
+    /* ──────────────────────────────────────────────────────────────
+       SLIDE 5 · SOLUCIÓN — 2×2 tiles
+       ────────────────────────────────────────────────────────────── */
+    #s5 .tiles {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 0;
+      margin-top: 36px;
+      border-top: 1px solid var(--hair);
+      border-left: 1px solid var(--hair);
+      background: var(--paper-2);
+    }
+    .tile {
+      padding: clamp(20px, 2.4vh, 34px) clamp(20px, 2vw, 36px);
+      border-right: 1px solid var(--hair);
+      border-bottom: 1px solid var(--hair);
+      position: relative;
+      display: flex; flex-direction: column;
+      gap: 10px;
+      transition: background 0.4s ease;
+    }
+    .tile::before {
+      content: ''; position: absolute;
+      top: 0; left: 0; height: 2px;
+      width: 0; background: var(--damm);
+      transition: width 0.6s var(--ease-out);
+      transition-delay: var(--d, 0ms);
+    }
+    .slide.active .tile::before { width: 60px; }
+
+    .tile .tile-tag {
+      font-family: var(--mono);
+      font-size: 11px;
+      letter-spacing: 0.22em;
+      text-transform: uppercase;
+      color: var(--damm);
+      font-weight: 500;
+    }
+    .tile h3 {
+      font-family: var(--display);
+      font-style: italic; font-weight: 500;
+      font-variation-settings: 'opsz' 60, 'SOFT' 40;
+      font-size: clamp(22px, 1.8vw, 30px);
+      line-height: 1.2;
+      letter-spacing: -0.01em;
+      color: var(--ink);
+    }
+    .tile p {
+      font-size: clamp(13.5px, 1vw, 17px);
+      line-height: 1.55;
+      color: var(--ink-soft);
+    }
+    .tile p strong { color: var(--ink); font-weight: 500; }
+    .tile .micro {
+      margin-top: auto;
+      font-family: var(--mono);
+      font-size: 11px;
+      letter-spacing: 0.1em;
+      color: var(--ink-faint);
+      padding-top: 10px;
+    }
+
+    /* ──────────────────────────────────────────────────────────────
+       SLIDE 6 · EVIDENCIA — KPI hero
+       ────────────────────────────────────────────────────────────── */
+    #s6 .kpi-row {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 0;
+      margin-top: clamp(28px, 4vh, 52px);
+      border-top: 1px solid var(--hair);
+    }
+    .kpi {
+      padding: clamp(20px, 2.6vh, 36px) clamp(20px, 2vw, 36px) 0 0;
+      border-right: 1px solid var(--hair);
+      position: relative;
+    }
+    .kpi:last-child { border-right: none; padding-right: 0; }
+    .kpi + .kpi { padding-left: clamp(20px, 2vw, 36px); }
+    .kpi::before {
+      content: '';
+      position: absolute; top: 0; left: 0;
+      width: 0; height: 2px;
+      background: var(--damm);
+      transition: width 0.8s var(--ease-out);
+      transition-delay: var(--d, 0ms);
+    }
+    .kpi:first-child::before { left: 0; }
+    .kpi:nth-child(2)::before { left: clamp(20px, 2vw, 36px); }
+    .kpi:nth-child(3)::before { left: clamp(20px, 2vw, 36px); }
+    .slide.active .kpi::before { width: 70px; }
+
+    .kpi .v {
+      font-family: var(--mono);
+      font-weight: 500;
+      font-size: clamp(52px, 7vw, 132px);
+      line-height: 1;
+      letter-spacing: -0.04em;
+      color: var(--ink);
+      font-variant-numeric: tabular-nums;
+      display: flex; align-items: baseline; gap: 6px;
+    }
+    .kpi .v .sign { color: var(--damm); font-size: 0.7em; line-height: 1; }
+    .kpi .v .u {
+      font-family: var(--body);
+      font-weight: 500;
+      font-size: 0.32em;
+      color: var(--ink-soft);
+      letter-spacing: 0;
+      text-transform: lowercase;
+      margin-left: 4px;
+    }
+
+    .kpi .l {
+      font-family: var(--mono);
+      font-size: clamp(11px, 0.85vw, 13px);
+      letter-spacing: 0.18em;
+      text-transform: uppercase;
+      color: var(--damm);
+      font-weight: 500;
+      margin-top: 22px;
+    }
+    .kpi .n {
+      font-size: clamp(14px, 1.05vw, 18px);
+      line-height: 1.5;
+      color: var(--ink-soft);
+      margin-top: 10px;
+      max-width: 36ch;
+    }
+    .kpi .n strong { color: var(--ink); font-weight: 500; }
+
+    #s6 .footnote {
+      margin-top: clamp(28px, 4vh, 48px);
+      padding-top: 18px;
+      border-top: 1px solid var(--hair);
+      font-family: var(--mono);
+      font-size: clamp(11px, 0.85vw, 13px);
+      letter-spacing: 0.06em;
+      color: var(--ink-faint);
+      line-height: 1.6;
+      max-width: 90ch;
+    }
+    #s6 .footnote b { color: var(--ink); font-weight: 500; }
+
+    /* ──────────────────────────────────────────────────────────────
+       SLIDE 7 · CIERRE
+       ────────────────────────────────────────────────────────────── */
+    #s7 .three {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 0;
+      margin-top: clamp(28px, 4vh, 48px);
+      border-top: 1px solid var(--hair);
+    }
+    .case {
+      padding: clamp(22px, 2.6vh, 36px) clamp(20px, 2vw, 36px) 0 0;
+      border-right: 1px solid var(--hair);
+    }
+    .case:last-child { border-right: none; padding-right: 0; }
+    .case + .case { padding-left: clamp(20px, 2vw, 36px); }
+
+    .case .tag {
+      font-family: var(--mono);
+      font-size: 11px;
+      letter-spacing: 0.22em;
+      text-transform: uppercase;
+      color: var(--damm);
+      font-weight: 500;
+    }
+    .case .v {
+      font-family: var(--display);
+      font-style: italic; font-weight: 500;
+      font-variation-settings: 'opsz' 96, 'SOFT' 40;
+      font-size: clamp(42px, 4.6vw, 76px);
+      line-height: 1;
+      letter-spacing: -0.018em;
+      color: var(--ink);
+      margin-top: 18px;
+      font-feature-settings: 'tnum' 1;
+    }
+    .case .v.dim { color: var(--ink-soft); }
+    .case .v .u {
+      font-family: var(--body); font-weight: 500;
+      font-size: 0.36em; color: var(--ink-soft);
+      letter-spacing: 0; font-style: normal;
+      margin-left: 4px;
+    }
+    .case .d {
+      font-size: clamp(13.5px, 1vw, 17px);
+      line-height: 1.55;
+      color: var(--ink-soft);
+      margin-top: 14px;
+      max-width: 32ch;
+    }
+    .case .d strong { color: var(--ink); font-weight: 500; }
+
+    #s7 .next-steps {
+      margin-top: clamp(36px, 5vh, 60px);
+      padding-top: 22px;
+      border-top: 1px solid var(--hair);
+      display: grid;
+      grid-template-columns: auto 1fr;
+      gap: 28px;
+      align-items: start;
+    }
+    #s7 .next-steps .lbl {
+      font-family: var(--mono);
+      font-size: 11px;
+      letter-spacing: 0.22em;
+      text-transform: uppercase;
+      color: var(--damm);
+      font-weight: 500;
+      padding-top: 5px;
+    }
+    #s7 .next-steps p {
+      font-family: var(--display);
+      font-style: italic; font-weight: 400;
+      font-variation-settings: 'opsz' 72, 'SOFT' 40;
+      font-size: clamp(18px, 1.6vw, 26px);
+      line-height: 1.4;
+      color: var(--ink-soft);
+    }
+    #s7 .next-steps p strong { color: var(--ink); font-weight: 500; }
+
+    /* ──────────────────────────────────────────────────────────────
+       PRINT — flatten all slides so Cmd+P works
+       ────────────────────────────────────────────────────────────── */
+    @media print {
+      html, body { overflow: visible; height: auto; cursor: auto; }
+      body::before { display: none; }
+      .deck, .rail, .reg, .nav-zone { display: none !important; }
+      .slide {
+        position: relative; opacity: 1 !important; visibility: visible !important;
+        inset: auto; min-height: 100vh; page-break-after: always;
+        padding: 60px 48px;
+      }
+      .slide .word-i, .slide .rise, .slide .fade { opacity: 1 !important; transform: none !important; }
+      .slide .draw-h, .slide .draw-v { transform: none !important; }
+      .slide .stamp { opacity: 1 !important; transform: none !important; }
+    }
+
+    /* small viewports — auditorium-only, but stay usable on laptops */
+    @media (max-width: 880px) {
+      .slide { padding: 80px 28px 80px; }
+      .rail { padding: 16px 24px; }
+      #s3 .grid-3 { grid-template-columns: 1fr; }
+      #s5 .tiles { grid-template-columns: 1fr; }
+      #s6 .kpi-row, #s7 .three { grid-template-columns: 1fr; }
+      .kpi, .case { border-right: none; border-bottom: 1px solid var(--hair); padding: 22px 0; }
+      .kpi + .kpi, .case + .case { padding-left: 0; }
+      .kpi:last-child, .case:last-child { border-bottom: none; }
+    }
+  </style>
+</head>
+<body>
+
+  <!-- decorative registration crosshairs -->
+  <div class="reg tl">
+    <svg viewBox="0 0 26 26" fill="none" stroke="#C9BFA7" stroke-width="0.6">
+      <circle cx="13" cy="13" r="5.5"/>
+      <line x1="13" y1="0" x2="13" y2="5"/><line x1="13" y1="21" x2="13" y2="26"/>
+      <line x1="0" y1="13" x2="5" y2="13"/><line x1="21" y1="13" x2="26" y2="13"/>
+    </svg>
+  </div>
+  <div class="reg tr">
+    <svg viewBox="0 0 26 26" fill="none" stroke="#C9BFA7" stroke-width="0.6">
+      <circle cx="13" cy="13" r="5.5"/>
+      <line x1="13" y1="0" x2="13" y2="5"/><line x1="13" y1="21" x2="13" y2="26"/>
+      <line x1="0" y1="13" x2="5" y2="13"/><line x1="21" y1="13" x2="26" y2="13"/>
+    </svg>
+  </div>
+  <div class="reg bl">
+    <svg viewBox="0 0 26 26" fill="none" stroke="#C9BFA7" stroke-width="0.6">
+      <circle cx="13" cy="13" r="5.5"/>
+      <line x1="13" y1="0" x2="13" y2="5"/><line x1="13" y1="21" x2="13" y2="26"/>
+      <line x1="0" y1="13" x2="5" y2="13"/><line x1="21" y1="13" x2="26" y2="13"/>
+    </svg>
+  </div>
+  <div class="reg br">
+    <svg viewBox="0 0 26 26" fill="none" stroke="#C9BFA7" stroke-width="0.6">
+      <circle cx="13" cy="13" r="5.5"/>
+      <line x1="13" y1="0" x2="13" y2="5"/><line x1="13" y1="21" x2="13" y2="26"/>
+      <line x1="0" y1="13" x2="5" y2="13"/><line x1="21" y1="13" x2="26" y2="13"/>
+    </svg>
+  </div>
+
+  <!-- click zones -->
+  <div class="nav-zone prev" data-nav="-1" aria-label="Anterior"></div>
+  <div class="nav-zone next" data-nav="1" aria-label="Siguiente"></div>
+
+  <!-- top rail -->
+  <header class="rail top">
+    <div class="brand">
+      <span class="damm">Damm</span><span class="star"></span>Engineering HUB · Hackathon
+    </div>
+    <div class="counter">
+      <span class="now" id="ct-now">01</span><span class="of"> / 07</span>
+      <span class="title" id="ct-title">Apertura</span>
+    </div>
+  </header>
+
+  <!-- bottom rail -->
+  <footer class="rail bottom">
+    <div class="progress">
+      <span id="ct-low">L14 · L17 · L19</span>
+      <span class="marks" id="marks">
+        <span class="mark cur"></span>
+        <span class="mark"></span>
+        <span class="mark"></span>
+        <span class="mark"></span>
+        <span class="mark"></span>
+        <span class="mark"></span>
+        <span class="mark"></span>
+      </span>
+    </div>
+    <div class="hint">
+      <kbd>←</kbd> <kbd>→</kbd> navegar &nbsp;·&nbsp; <kbd>F</kbd> pantalla completa
+    </div>
+  </footer>
+
+  <!-- ──────────────────────────────────────────────────────────────
+       DECK
+       ────────────────────────────────────────────────────────────── -->
+  <main class="deck">
+
+    <!-- ── 1 · COVER ────────────────────────────────────────────── -->
+    <section class="slide active" id="s1" data-title="Apertura">
+      <div class="meta-top">
+        <div class="fade" style="--d:120ms"><b>Memoria del proyecto</b> · Reto Operaciones</div>
+        <div class="right fade" style="--d:120ms"><b>Damm × Engineering HUB</b><br/>Mayo 2026</div>
+      </div>
+
+      <div class="slide-inner stack">
+        <div class="deck-eyebrow fade" style="--d:300ms">
+          <span class="rule"></span><span>LineWise</span><span class="rule" style="flex:0 0 24px"></span>
+        </div>
+
+        <h1 aria-label="Cerrar el bucle entre lo planificado y lo ejecutado">
+          <span class="word"><span class="word-i" style="--d:200ms">Cerrar</span></span>
+          <span class="word"><span class="word-i" style="--d:280ms">el</span></span>
+          <span class="word"><span class="word-i" style="--d:360ms">bucle.</span></span><br/>
+          <span class="word"><span class="word-i" style="--d:560ms">De</span></span>
+          <span class="word"><span class="word-i" style="--d:640ms">lo</span></span>
+          <span class="word"><span class="word-i" style="--d:720ms accent">planificado</span></span><br/>
+          <span class="word"><span class="word-i" style="--d:880ms">a</span></span>
+          <span class="word"><span class="word-i" style="--d:960ms">lo</span></span>
+          <span class="word"><span class="word-i" style="--d:1040ms"><em class="accent" style="color:var(--damm);font-style:italic;">ejecutado</em>.</span></span>
+        </h1>
+
+        <p class="tagline rise" style="--d:1400ms">
+          Una memoria sobre planificar las líneas de enlatado de El Prat con los datos que ya tenemos, no con tiempos teóricos.
+        </p>
+      </div>
+
+      <div class="baseline">
+        <span class="label fade" style="--d:1700ms">LineWise · 2026</span>
+        <span class="h draw-h" style="--d:1500ms"></span>
+        <span class="label fade" style="--d:1700ms">L14 · L17 · L19 · El Prat</span>
+      </div>
+    </section>
+
+    <!-- ── 2 · PREMISA ─────────────────────────────────────────── -->
+    <section class="slide" id="s2" data-title="La premisa">
+      <div class="slide-inner">
+        <div class="eyebrow fade" style="--d:80ms"><span>Premisa · 00</span></div>
+
+        <div class="inner-2" style="margin-top: 28px;">
+          <div class="premise-block">
+            <div class="rise" style="--d:200ms">
+              <span class="ink">Un mismo SKU en una misma línea</span>
+            </div>
+            <div class="rise" style="--d:360ms">
+              <span class="soft">logra entre</span>
+              <span class="num" data-count="36" data-suffix="%" data-decimals="0">0%</span>
+              <span class="sep draw-h" style="--d:1100ms"></span>
+              <span class="num" data-count="80" data-suffix="%" data-decimals="0">0%</span>
+              <span class="soft">de OEE.</span>
+            </div>
+          </div>
+
+          <div class="premise-note draw-v rise" style="--d:1300ms">
+            Y nadie está sesgando sistemáticamente cada nuevo plan hacia el extremo alto de ese rango. La diferencia entre un día medio y un día bueno cabe entera dentro de la misma combinación SKU + línea: la fábrica ya sabe cómo hacerlo bien, pero esa información no vuelve al plan.
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ── 3 · CONTEXTO ─────────────────────────────────────────── -->
+    <section class="slide" id="s3" data-title="Contexto">
+      <div class="slide-inner">
+        <div class="eyebrow fade" style="--d:60ms"><span>Contexto · 01</span></div>
+
+        <h2 class="headline rise" style="--d:160ms; margin-top:18px;">
+          Cómo se <em>planifica</em> hoy.
+        </h2>
+
+        <div class="grid-3">
+          <div>
+            <p class="body rise" style="--d:340ms">
+              Damm opera las líneas <strong>14, 17 y 19</strong> en El Prat con <strong>Blue Yonder / JDA</strong>, que genera secuencias usando una matriz estática de cambios teóricos (Tabla CF Prat) y supuestos estándar de ritmo.
+            </p>
+            <p class="body rise" style="--d:460ms; margin-top:18px;">
+              Cuando entra demanda urgente, el planificador reorganiza a mano. El OEE ejecutado, las desviaciones y las pérdidas por mantenimiento se registran en el MES, pero <strong>no vuelven al plan</strong>.
+            </p>
+          </div>
+          <div>
+            <div class="data-strip">
+              <div class="data-cell">
+                <div class="v rise" style="--d:520ms">170</div>
+                <div class="l fade" style="--d:700ms">SKUs activos</div>
+              </div>
+              <div class="data-cell">
+                <div class="v rise" style="--d:580ms">3</div>
+                <div class="l fade" style="--d:760ms">Líneas L14 · L17 · L19</div>
+              </div>
+              <div class="data-cell">
+                <div class="v rise" style="--d:640ms" data-count="2200" data-suffix="+" data-decimals="0">0+</div>
+                <div class="l fade" style="--d:820ms">OFs históricas 2025</div>
+              </div>
+              <div class="data-cell">
+                <div class="v rise" style="--d:700ms">6 MB</div>
+                <div class="l fade" style="--d:880ms">Base canónica DuckDB</div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ── 4 · CAUSAS ───────────────────────────────────────────── -->
+    <section class="slide" id="s4" data-title="Causas">
+      <div class="slide-inner">
+        <div class="eyebrow fade" style="--d:60ms"><span>Causas · 02</span></div>
+        <h2 class="headline rise" style="--d:160ms; margin-top:18px;">
+          Por qué la realidad <em>no se parece</em> al plan.
+        </h2>
+
+        <div class="causes-grid">
+          <div class="cause">
+            <div class="num rise" style="--d:300ms">01</div>
+            <div class="body-c">
+              <div class="h rise" style="--d:340ms">Sin bucle ejecución → planificación.</div>
+              <div class="d rise" style="--d:400ms">El OEE ejecutado, las desviaciones de cambio y las pérdidas por mantenimiento se registran, pero no se reincorporan a las decisiones de secuenciación.</div>
+            </div>
+          </div>
+          <div class="cause">
+            <div class="num rise" style="--d:420ms">02</div>
+            <div class="body-c">
+              <div class="h rise" style="--d:460ms">Los tiempos teóricos no coinciden con la realidad.</div>
+              <div class="d rise" style="--d:520ms">La matriz CF Prat da un único número por (línea, estado-origen, estado-destino); las duraciones reales varían según el par de SKUs, el turno y el estado del equipo.</div>
+            </div>
+          </div>
+          <div class="cause">
+            <div class="num rise" style="--d:540ms">03</div>
+            <div class="body-c">
+              <div class="h rise" style="--d:580ms">El planificador es ciego al contexto.</div>
+              <div class="d rise" style="--d:640ms">El SKU anterior, la proximidad de mantenimiento, el día de la semana y las combinaciones con bajo rendimiento conocidas no entran en la decisión.</div>
+            </div>
+          </div>
+          <div class="cause">
+            <div class="num rise" style="--d:660ms">04</div>
+            <div class="body-c">
+              <div class="h rise" style="--d:700ms">Razonamiento intuitivo en urgencias.</div>
+              <div class="d rise" style="--d:760ms">Decidir entre L17 y L19 hoy es experiencia, no “las últimas 14 veces que ejecutamos esta transición, esto fue lo que pasó”.</div>
+            </div>
+          </div>
+          <div class="cause">
+            <div class="num rise" style="--d:780ms">05</div>
+            <div class="body-c">
+              <div class="h rise" style="--d:820ms">No se mide la pérdida evitable.</div>
+              <div class="d rise" style="--d:880ms">Por OF, semana o línea, no hay cifra de cuánto OEE se dejó sobre la mesa frente a los días buenos.</div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ── 5 · SOLUCIÓN ─────────────────────────────────────────── -->
+    <section class="slide" id="s5" data-title="Solución">
+      <div class="slide-inner">
+        <div class="eyebrow fade" style="--d:60ms"><span>Solución · 03</span></div>
+        <h2 class="headline rise" style="--d:160ms; margin-top:18px;">
+          Modelo que <em>aprende</em> del histórico, optimizador que respeta las <em>restricciones reales</em>.
+        </h2>
+
+        <div class="tiles">
+          <div class="tile rise" style="--d:340ms">
+            <div class="tile-tag">Datos</div>
+            <h3>Capa canónica sobre los Excels</h3>
+            <p>5 Excels operativos + Tabla CF Prat ingeridos a una DuckDB de 6 MB. <strong>fact_runs</strong>, <strong>fact_changeovers</strong>, <strong>dim_sku</strong> y la fórmula real de Damm <strong>horas_cambio = PAR_TOT − (PNP + LIMPIEZA + IDLE)</strong>.</p>
+            <div class="micro">2.141 OFs · 2025</div>
+          </div>
+          <div class="tile rise" style="--d:440ms">
+            <div class="tile-tag">Modelo</div>
+            <h3>LightGBM cuantílico × 3</h3>
+            <p>Tres regresores (p10 · p50 · p90) sobre 1.670 OFs ene–sep 2025. ~70 features: plan, SKU, OF anterior, historia reciente de línea, mantenimiento, calendario. Cada predicción con drivers SHAP.</p>
+            <div class="micro">α = 0,10 / 0,50 / 0,90</div>
+          </div>
+          <div class="tile rise" style="--d:540ms">
+            <div class="tile-tag">Optimizador</div>
+            <h3>Reasigna sin romper restricciones</h3>
+            <p>Compatibilidad línea-formato (<strong>L14</strong> 1/3, 1/2 · <strong>L17</strong> 1/3 · <strong>L19</strong> 1/3, 1/2, 2/5), deadlines, invarianza HL por SKU, gate ≥ 3 corridas. Si empeora, vuelve al plan original.</p>
+            <div class="micro">Modos p50 · p90</div>
+          </div>
+          <div class="tile rise" style="--d:640ms">
+            <div class="tile-tag">Plataforma</div>
+            <h3>Cuatro vistas para el planificador</h3>
+            <p><strong>Observabilidad</strong> (KPIs + Ask bar), <strong>Validar plan</strong> (Procede · Revisar · Evitar), <strong>Post mortem</strong> y <strong>Urgencias</strong> sobre la misma DuckDB.</p>
+            <div class="micro">Next.js · Prisma · DuckDB · LightGBM</div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ── 6 · EVIDENCIA ────────────────────────────────────────── -->
+    <section class="slide" id="s6" data-title="Evidencia">
+      <div class="slide-inner">
+        <div class="eyebrow fade" style="--d:60ms"><span>Evidencia · 04</span></div>
+        <h2 class="headline rise" style="--d:160ms; margin-top:18px;">
+          Cómo se <em>comporta</em> el modelo.
+        </h2>
+
+        <div class="kpi-row">
+          <div class="kpi" style="--d:300ms">
+            <div class="v rise" style="--d:340ms"><span data-count="0.103" data-decimals="3" data-format="es">0,000</span></div>
+            <div class="l fade" style="--d:900ms">MAE sobre p50</div>
+            <div class="n fade" style="--d:1000ms">Mejora del <strong>+20 %</strong> sobre el baseline naive de la media, <strong>+16 %</strong> sobre solo tiempos teóricos.</div>
+          </div>
+          <div class="kpi" style="--d:420ms">
+            <div class="v rise" style="--d:460ms"><span class="sign">+</span><span data-count="8.3" data-decimals="1" data-format="es">0,0</span><span class="u">pts</span></div>
+            <div class="l fade" style="--d:1020ms">Gap controlable · Q4 2025</div>
+            <div class="n fade" style="--d:1120ms">OEE real <strong>57,1 %</strong> frente al techo p90 del modelo <strong>63,5 %</strong>, ponderado por hectolitros.</div>
+          </div>
+          <div class="kpi" style="--d:540ms">
+            <div class="v rise" style="--d:580ms"><span class="sign">+</span><span data-count="2.5" data-decimals="1" data-format="es">0,0</span><span class="u">pts</span></div>
+            <div class="l fade" style="--d:1140ms">Captura realista del optimizador</div>
+            <div class="n fade" style="--d:1240ms">Asumiendo 30 % del gap ≈ <strong><span data-count="27300" data-decimals="0" data-format="es-thousands">0</span>&nbsp;HL</strong> adicionales al trimestre.</div>
+          </div>
+        </div>
+
+        <div class="footnote fade" style="--d:1400ms">
+          <b>Drivers SHAP principales</b> · sku · prev_oee · sku_line_oee_p90_last_30d · familia · week_iso · linea_oee_p50_last_7d. Los errores más grandes corresponden a incidencias intra-turno (averías, calidad) que ningún modelo basado en planificación puede prever.
+        </div>
+      </div>
+    </section>
+
+    <!-- ── 7 · CIERRE ───────────────────────────────────────────── -->
+    <section class="slide" id="s7" data-title="Alcance honesto">
+      <div class="slide-inner">
+        <div class="eyebrow fade" style="--d:60ms"><span>Alcance honesto · 05</span></div>
+        <h2 class="headline rise" style="--d:160ms; margin-top:18px;">
+          Lo que LineWise <em>hace</em>, lo que no, y dónde sigue.
+        </h2>
+
+        <div class="three">
+          <div class="case">
+            <div class="tag fade" style="--d:340ms">Validar</div>
+            <div class="v dim rise" style="--d:400ms">+0,00<span class="u">pts</span></div>
+            <div class="d rise" style="--d:520ms">Sobre el Planificado de <strong>mayo 2026</strong>, el plan ya está cerca del techo histórico. La respuesta correcta es no tocarlo, y el sistema lo dice.</div>
+          </div>
+          <div class="case">
+            <div class="tag fade" style="--d:440ms">Mejorar</div>
+            <div class="v rise" style="--d:500ms">+0,42<span class="u">pts</span></div>
+            <div class="d rise" style="--d:620ms">Sobre un <strong>Diario Hl mediocre</strong>, el optimizador propone siete reasignaciones cruzadas de (línea × día × turno) con su par origen y destino auditado.</div>
+          </div>
+          <div class="case">
+            <div class="tag fade" style="--d:540ms">Diagnosticar</div>
+            <div class="v dim rise" style="--d:600ms">W14 ’25</div>
+            <div class="d rise" style="--d:720ms">Sobre una semana histórica mala, el optimizador no encuentra mejora estructural: <strong>el plan no era el problema, lo fue la ejecución</strong>.</div>
+          </div>
+        </div>
+
+        <div class="next-steps">
+          <div class="lbl fade" style="--d:900ms">Próximos pasos</div>
+          <p class="rise" style="--d:980ms">
+            Partir OFs entre slots, recalibrar la banda <strong>p10–p90</strong> (cobertura 67 % → objetivo 80 %), pasar a una formulación global con <strong>OR-tools CP-SAT</strong>, abrir horizonte multi-semana. Con 2024 y 2023 añadidos, el set de entrenamiento dobla y se esperan <strong>2–3 puntos extra de MAE</strong>.
+          </p>
+        </div>
+      </div>
+    </section>
+
+  </main>
+
+  <!-- ──────────────────────────────────────────────────────────────
+       SCRIPT — keyboard + click nav, number tickers, slide reveal
+       ────────────────────────────────────────────────────────────── -->
+  <script>
+    (() => {
+      const slides   = Array.from(document.querySelectorAll('.slide'));
+      const total    = slides.length;
+      const ctNow    = document.getElementById('ct-now');
+      const ctTitle  = document.getElementById('ct-title');
+      const marks    = document.querySelectorAll('#marks .mark');
+      let i = 0;
+      let animating = false;
+
+      // ── number tickers ───────────────────────────────────────────
+      function formatNumber(value, decimals, fmt) {
+        if (fmt === 'es-thousands') {
+          return Math.round(value).toLocaleString('es-ES');
+        }
+        if (fmt === 'es') {
+          return value.toFixed(decimals).replace('.', ',');
+        }
+        return value.toFixed(decimals);
+      }
+
+      function tick(el) {
+        const target   = parseFloat(el.dataset.count);
+        const decimals = parseInt(el.dataset.decimals || '0', 10);
+        const suffix   = el.dataset.suffix || '';
+        const fmt      = el.dataset.format || (decimals > 0 ? 'es' : '');
+        const dur      = 1400;
+        const start    = performance.now();
+        // ease-out quint
+        const ease = t => 1 - Math.pow(1 - t, 5);
+        function step(now) {
+          const t = Math.min(1, (now - start) / dur);
+          const v = target * ease(t);
+          el.textContent = formatNumber(v, decimals, fmt) + (t < 1 ? '' : suffix);
+          if (t < 1) requestAnimationFrame(step);
+          else el.textContent = formatNumber(target, decimals, fmt) + suffix;
+        }
+        requestAnimationFrame(step);
+      }
+
+      function runTickers(slide) {
+        slide.querySelectorAll('[data-count]').forEach((el) => {
+          // small per-element delay to feel "mechanical"
+          const d = parseInt(el.style.getPropertyValue('--d') || '0', 10) || 0;
+          setTimeout(() => tick(el), Math.max(120, d - 60));
+        });
+      }
+
+      // ── navigation ───────────────────────────────────────────────
+      function go(next) {
+        if (animating) return;
+        next = Math.max(0, Math.min(total - 1, next));
+        if (next === i) return;
+        animating = true;
+
+        const cur = slides[i];
+        const nxt = slides[next];
+
+        cur.classList.remove('active');
+        nxt.classList.add('active');
+
+        // reset reveals on the OUTGOING slide a beat later so they re-fire next time
+        setTimeout(() => {
+          cur.querySelectorAll('.rise, .fade, .word-i, .draw-h, .draw-v, .stamp, .tile, .kpi')
+             .forEach(el => { /* no-op: just letting transitions reset via class removal */ });
+          animating = false;
+        }, 600);
+
+        i = next;
+        updateRail();
+        runTickers(nxt);
+      }
+
+      function updateRail() {
+        ctNow.textContent   = String(i + 1).padStart(2, '0');
+        ctTitle.textContent = slides[i].dataset.title || '';
+        marks.forEach((m, idx) => {
+          m.classList.toggle('cur',  idx === i);
+          m.classList.toggle('done', idx <  i);
+        });
+      }
+
+      // ── keyboard ─────────────────────────────────────────────────
+      document.addEventListener('keydown', (e) => {
+        if (e.metaKey || e.ctrlKey || e.altKey) return;
+        const k = e.key;
+        if (k === 'ArrowRight' || k === 'PageDown' || k === ' ' || k === 'j' || k === 'l') { e.preventDefault(); go(i + 1); }
+        else if (k === 'ArrowLeft' || k === 'PageUp' || k === 'k' || k === 'h') { e.preventDefault(); go(i - 1); }
+        else if (k === 'Home') { go(0); }
+        else if (k === 'End')  { go(total - 1); }
+        else if (k === 'f' || k === 'F') {
+          if (!document.fullscreenElement) document.documentElement.requestFullscreen?.();
+          else document.exitFullscreen?.();
+        }
+        else if (/^[1-9]$/.test(k)) {
+          const n = parseInt(k, 10) - 1;
+          if (n < total) go(n);
+        }
+      });
+
+      // ── click zones ──────────────────────────────────────────────
+      document.querySelectorAll('[data-nav]').forEach((z) => {
+        z.addEventListener('click', () => go(i + parseInt(z.dataset.nav, 10)));
+      });
+
+      // ── initial state — fire tickers on slide 1 if any ───────────
+      updateRail();
+      runTickers(slides[0]);
+    })();
+  </script>
+</body>
+</html>

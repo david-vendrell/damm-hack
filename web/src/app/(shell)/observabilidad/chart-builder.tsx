@@ -454,6 +454,12 @@ export function ChartBuilder({
             )}
           </div>
           <DataQualityNote data={data.data} loading={data.isLoading} />
+          <ChartExplanation
+            data={data.data}
+            config={config}
+            chartName={name}
+            loading={data.isLoading || metricas.isLoading}
+          />
         </div>
       </div>
 
@@ -642,6 +648,89 @@ function DataQualityNote({ data, loading }: { data?: QueryResult; loading: boole
       LIMPIEZA ya está fuera del agregado.
     </div>
   );
+}
+
+function ChartExplanation({
+  data,
+  config,
+  chartName,
+  loading,
+}: {
+  data?: QueryResult;
+  config: ChartConfig;
+  chartName: string;
+  loading: boolean;
+}) {
+  const hasContent =
+    !!data && ((data.rows && data.rows.length > 0) || typeof data.total === 'number');
+
+  const explainKey = useMemo(
+    () => ({ config, dataSig: data ? signature(data) : null }),
+    [config, data],
+  );
+
+  const explain = useQuery({
+    queryKey: ['obs-explain', explainKey],
+    enabled: !loading && hasContent,
+    staleTime: 5 * 60 * 1000,
+    retry: false,
+    queryFn: () =>
+      jpost<{ explanation: string; error?: string; message?: string }>(
+        '/api/observabilidad/explain',
+        { config, data, chartName: chartName || undefined },
+      ),
+  });
+
+  if (loading) return null;
+  if (!hasContent) return null;
+
+  return (
+    <div className="mt-3 rounded border border-hairline bg-cream/60 px-3 py-2.5">
+      <div className="mb-1 flex items-center gap-2 text-[10px] uppercase tracking-wider text-ink-3">
+        <span className="inline-block h-1.5 w-1.5 rounded-full bg-damm" />
+        Explicación · ChatGPT
+        {explain.isFetching && <span className="text-ink-4">· generando…</span>}
+      </div>
+      {explain.isFetching && !explain.data ? (
+        <Skeleton className="h-12 w-full" />
+      ) : explain.isError ? (
+        <ExplanationError onRetry={() => explain.refetch()} />
+      ) : explain.data?.explanation ? (
+        <p className="text-sm leading-relaxed text-ink-2">{explain.data.explanation}</p>
+      ) : null}
+    </div>
+  );
+}
+
+function ExplanationError({ onRetry }: { onRetry: () => void }) {
+  return (
+    <div className="flex items-center justify-between gap-3">
+      <p className="text-xs text-muted">
+        No se pudo generar la explicación. Revisa la clave de OpenAI o reintenta.
+      </p>
+      <button
+        onClick={onRetry}
+        className="rounded-pill border border-hairline px-2.5 py-0.5 text-[11px] text-ink-2 hover:border-ink hover:text-ink"
+      >
+        Reintentar
+      </button>
+    </div>
+  );
+}
+
+function signature(data: QueryResult): string {
+  const rowsSig = data.rows
+    .map((r) => `${r.key}:${r.value.toFixed(4)}`)
+    .join('|');
+  return [
+    data.measure,
+    data.aggregation,
+    data.dimension ?? '',
+    data.breakdown ?? '',
+    data.total ?? '',
+    data.previousTotal ?? '',
+    rowsSig,
+  ].join('#');
 }
 
 function FiltersEditor({
