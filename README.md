@@ -38,12 +38,15 @@ cd damm-hack
 
 `start.sh` is idempotent. It will:
 
-1. Verify Node 18+ and npm.
+1. Verify Node 18+, npm and Python 3.
 2. Confirm the five required Excels are present in `Repte operacions/`.
-3. Install `web/` dependencies if `node_modules` is missing.
-4. Apply Prisma migrations to `web/prisma/dev.db`.
-5. Build `db/linewise.duckdb` from the Excels (only if missing).
-6. Launch Prisma Studio on `http://localhost:5555` and the Next dev server on `http://localhost:3000`.
+3. Seed `web/.env` from `web/.env.example` if missing (you must then add your `OPENAI_API_KEY`).
+4. Install `web/` JS dependencies if `node_modules` is missing.
+5. Create a `.venv` and `pip install -r requirements.txt` for the model sidecar.
+6. Sync the 3D viewer assets into `web/public/interactive-3d/`.
+7. Apply Prisma migrations to `web/prisma/dev.db`.
+8. Build `db/linewise.duckdb` from the Excels (only if missing).
+9. Launch Prisma Studio (`:5555`), the LineWise model sidecar (`:8001`) and the Next dev server (`:3000`).
 
 Then open the dashboard at **http://localhost:3000/observabilidad**.
 
@@ -59,41 +62,35 @@ Useful flags:
 ### One-time prerequisites
 
 - **Node 18+** and **npm**.
-- **Python 3** with `duckdb`, `pandas`, `openpyxl` (only needed the first time, to build `db/linewise.duckdb`). Quick setup:
-  ```bash
-  python3 -m venv .venv && source .venv/bin/activate
-  pip install duckdb pandas openpyxl
-  ```
+- **Python 3.10+** with `pip` (used to build `db/linewise.duckdb` and to run the model sidecar). `start.sh` creates a `.venv` and installs `requirements.txt` for you on first run.
 - macOS only, and only if you intend to retrain the model: `brew install libomp` (LightGBM dependency). Not needed to run the dashboard.
 
 ### Environment variables (`web/.env`)
 
-The dashboard reads configuration from `web/.env` (loaded by Next.js) or `web/.env.local` for personal overrides. Both files are gitignored. Create `web/.env` once on a fresh clone:
+The dashboard reads configuration from `web/.env` (loaded by Next.js) or `web/.env.local` for personal overrides. Both files are gitignored.
+
+On first run, `start.sh` will copy `web/.env.example` → `web/.env` automatically. **You then need to open that file and paste your own `OPENAI_API_KEY`** — every other default is fine for local development.
 
 ```bash
 # web/.env
-DATABASE_URL="file:./prisma/dev.db"     # Prisma SQLite path (used by start.sh)
-OPENAI_API_KEY="sk-..."                 # required: powers the Ask bar in Observabilidad
-OPENAI_MODEL="gpt-4o-mini"              # optional, defaults to gpt-4o-mini
-HF_TOKEN="hf_..."                       # optional: enables the LineWise HF Space as a model fallback
-LINEWISE_URL="http://localhost:8001"    # optional: local model sidecar URL (default shown)
-DATA_DIR="../Repte operacions"          # optional: override path to the source Excels
+DATABASE_URL="file:./dev.db"                 # Prisma SQLite path (matches start.sh)
+LINEWISE_URL="http://localhost:8001"         # model sidecar (started by start.sh)
+OPENAI_API_KEY="sk-..."                      # required: Ask bar in /observabilidad
+OPENAI_MODEL="gpt-4o-mini"                   # optional, server-side model id
+NEXT_PUBLIC_OPENAI_MODEL="gpt-4o-mini"       # optional, label shown in the Ask bar UI
+# HF_TOKEN="hf_..."                          # optional: only for redeploying the HF Space
+# DATA_DIR="../Repte operacions"             # optional: override source-Excel path
 ```
 
 What each one does:
 
-- **`DATABASE_URL`** — Prisma's SQLite connection string. The default `file:./prisma/dev.db` matches what `start.sh` migrates. Only change it if you point Prisma at a different file.
-- **`OPENAI_API_KEY`** — required for the natural-language Ask bar in `/observabilidad` (`web/src/server/openai.ts`). Without it, the Ask bar returns a `MissingEnvError`; the rest of the dashboard still works. Get a key at <https://platform.openai.com/api-keys>.
-- **`OPENAI_MODEL`** — model used by the Ask bar. Defaults to `gpt-4o-mini` (cheap + fast). Override with `gpt-4o` or another OpenAI chat model if you want higher quality.
-- **`HF_TOKEN`** — Hugging Face token with read access to the private `marcaguilar/linewise-demo` Space. When set, `web/src/server/linewise-client.ts` calls the Space for predictions; when absent, the app degrades to a local heuristic and surfaces the warning *"Modelo LineWise no disponible (sin HF_TOKEN o Space offline). Predicciones por heurística local."* Also used by `scripts/10_push_to_hf_space.py` when deploying the Space.
-- **`LINEWISE_URL`** — if you run the engine as a local sidecar (`python3 app.py`), point this at it. Defaults to `http://localhost:8001`.
-- **`DATA_DIR`** — used by `npm run ingest` if you keep the Damm Excels somewhere other than `Repte operacions/`.
-
-Repo-level scripts (Python) only need `HF_TOKEN`, and only to push the HF Space. Export it inline:
-
-```bash
-HF_TOKEN=hf_xxx python3 scripts/10_push_to_hf_space.py
-```
+- **`DATABASE_URL`** — Prisma's SQLite connection string. The default `file:./dev.db` matches what `start.sh` migrates. Only change it if you point Prisma at a different file.
+- **`LINEWISE_URL`** — base URL of the LineWise model sidecar (`scripts/local_model_server.py`, FastAPI on `:8001`). `start.sh` boots the sidecar for you via `npm run dev:full`. If the sidecar is unreachable, `/validar` and `/urgencias` silently fall back to a local heuristic — keep this pointed at the running sidecar to see the real model.
+- **`OPENAI_API_KEY`** — required for the natural-language Ask bar in `/observabilidad` (`web/src/server/openai.ts`). Without it the Ask bar 500s; the rest of the dashboard still works. Get a key at <https://platform.openai.com/api-keys>.
+- **`OPENAI_MODEL`** — model id the server uses when calling OpenAI. Defaults to `gpt-4o-mini`.
+- **`NEXT_PUBLIC_OPENAI_MODEL`** — same name surfaced as a small badge under the Ask bar; keep in sync with `OPENAI_MODEL`.
+- **`HF_TOKEN`** *(optional)* — Hugging Face token. Not used by the running app any more; only `scripts/10_push_to_hf_space.py` reads it when redeploying the private `marcaguilar/linewise-demo` Space.
+- **`DATA_DIR`** *(optional)* — used by `npm run ingest` if you keep the Damm Excels somewhere other than `Repte operacions/`.
 
 Never commit `.env` or `.env.local`. They are gitignored on purpose; keys are personal.
 

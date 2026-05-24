@@ -4,6 +4,13 @@ __pycache__/
 .venv/
 venv/
 
+# Environment files (keys live here — never commit)
+.env
+.env.local
+**/.env
+**/.env.local
+!**/.env.example
+
 # DuckDB (uncomment if you DON'T want to commit the DB)
 # db/*.duckdb
 # db/*.duckdb.wal
