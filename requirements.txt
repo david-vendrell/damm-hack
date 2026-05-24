@@ -8,3 +8,7 @@ python-holidays>=0.40
 huggingface_hub>=0.20
 gradio>=4.0
 pyarrow>=14.0
+# LineWise sidecar (scripts/local_model_server.py — model gateway on :8001)
+fastapi>=0.110
+uvicorn>=0.27
+python-multipart>=0.0.9

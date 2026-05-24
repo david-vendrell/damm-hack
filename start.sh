@@ -3,15 +3,20 @@
 # Idempotent: re-run any time.
 #
 # What it does, in order:
-#   1. Verify Node + npm (and Python if DuckDB needs (re)building)
-#   2. Install npm deps (only if node_modules missing)
-#   3. Apply Prisma migrations → web/prisma/dev.db  (SavedChart + planning models)
-#   4. Build the DuckDB analytics DB (db/linewise.duckdb · fact_runs) if missing
-#   5. Launch Prisma Studio (port 5555) + Next dev server (port 3000)
+#   1. Verify Node + npm + Python
+#   2. Seed web/.env from web/.env.example if missing (warns if keys still blank)
+#   3. Install npm deps (only if node_modules missing)
+#   4. Build a .venv and install requirements.txt (only if missing)
+#   5. Sync the 3D viewer assets into web/public/interactive-3d/
+#   6. Apply Prisma migrations → web/prisma/dev.db  (SavedChart + planning models)
+#   7. Build the DuckDB analytics DB (db/linewise.duckdb · fact_runs) if missing
+#   8. Launch Prisma Studio (5555) + LineWise model sidecar (8001) + Next (3000)
 #
 # All dashboard metrics (KPIs, chart-builder, saved charts) read from DuckDB
 # `fact_runs`. The SQLite DB only stores editable objects: SavedChart configs,
 # SKU master, plans, etc. — visible in Prisma Studio.
+# The model sidecar (scripts/local_model_server.py) powers /validar and
+# /urgencias; without it those pages silently fall back to a heuristic.
 
 set -euo pipefail
 
@@ -70,10 +75,11 @@ EOF
 done
 
 # ── 1. prerequisites ─────────────────────────────────────────────────────────
-step "1/5  Checking prerequisites"
-command -v node >/dev/null 2>&1 || fail "node not found — install Node 18+ (https://nodejs.org)"
-command -v npm  >/dev/null 2>&1 || fail "npm not found"
-ok "node $(node -v) · npm $(npm -v)"
+step "1/8  Checking prerequisites"
+command -v node    >/dev/null 2>&1 || fail "node not found — install Node 18+ (https://nodejs.org)"
+command -v npm     >/dev/null 2>&1 || fail "npm not found"
+command -v python3 >/dev/null 2>&1 || fail "python3 not found — install Python 3.10+"
+ok "node $(node -v) · npm $(npm -v) · python $(python3 --version | awk '{print $2}')"
 
 [ -d "$WEB" ] || fail "web/ directory missing at $WEB"
 [ -d "$DATA" ] || fail "Data directory '$DATA' missing. Drop the Damm Excels there."
@@ -90,9 +96,28 @@ for f in "${REQUIRED_XLSX[@]}"; do
 done
 ok "all 5 required Excels present in 'Repte operacions/'"
 
-# ── 2. npm install ───────────────────────────────────────────────────────────
+# ── 2. seed web/.env from the example template if missing ────────────────────
+step "2/8  Checking web/.env (API keys + URLs)"
+if [ ! -f "$WEB/.env" ]; then
+  if [ -f "$WEB/.env.example" ]; then
+    cp "$WEB/.env.example" "$WEB/.env"
+    warn "created web/.env from web/.env.example — edit it now and add your OPENAI_API_KEY"
+    warn "the Ask bar in /observabilidad will 500 until OPENAI_API_KEY is set"
+  else
+    fail "web/.env missing and no web/.env.example to seed from"
+  fi
+else
+  if grep -qE '^OPENAI_API_KEY="?sk-\.\.\.' "$WEB/.env" 2>/dev/null || \
+     ! grep -qE '^OPENAI_API_KEY=' "$WEB/.env" 2>/dev/null; then
+    warn "web/.env exists but OPENAI_API_KEY looks unset — the Ask bar will not work"
+  else
+    ok "web/.env present"
+  fi
+fi
+
+# ── 3. npm install ───────────────────────────────────────────────────────────
 cd "$WEB"
-step "2/5  Installing JS dependencies"
+step "3/8  Installing JS dependencies"
 if [ -d "node_modules" ] && [ -f "node_modules/.package-lock.json" ]; then
   ok "node_modules already installed (delete it to force re-install)"
 else
@@ -100,48 +125,64 @@ else
   ok "deps installed"
 fi
 
-# ── 3. prisma migrate ────────────────────────────────────────────────────────
-step "3/5  Applying Prisma migrations (web/prisma/dev.db)"
+# ── 4. python venv + requirements ────────────────────────────────────────────
+cd "$ROOT"
+step "4/8  Setting up Python venv (.venv) for the model sidecar"
+if [ ! -d ".venv" ]; then
+  python3 -m venv .venv
+  ok "created .venv"
+fi
+# shellcheck disable=SC1091
+source .venv/bin/activate
+
+# Activate the venv for the rest of the script so `python`, `pip`, and the
+# `npm run model` subprocess all see the sidecar's dependencies.
+if ! python -c "import duckdb, pandas, openpyxl, fastapi, uvicorn" 2>/dev/null; then
+  pip install --quiet --upgrade pip
+  pip install --quiet -r requirements.txt
+  ok "Python deps installed into .venv (fastapi, uvicorn, duckdb, lightgbm, …)"
+else
+  ok "Python deps already satisfied in .venv"
+fi
+
+# ── 5. sync 3D viewer assets ─────────────────────────────────────────────────
+step "5/8  Syncing 3D viewer assets into web/public/interactive-3d/"
+mkdir -p "$WEB/public"
+(cd "$WEB" && npm run --silent sync:3d) && ok "3D assets synced"
+
+# ── 6. prisma migrate ────────────────────────────────────────────────────────
+cd "$WEB"
+step "6/8  Applying Prisma migrations (web/prisma/dev.db)"
 npx --yes prisma migrate deploy
 ok "schema in sync (includes SavedChart for the chart-builder)"
 
-# ── 4. DuckDB build (analytics fact_runs) ────────────────────────────────────
+# ── 7. DuckDB build (analytics fact_runs) ────────────────────────────────────
 cd "$ROOT"
-step "4/5  Building DuckDB analytics DB (db/linewise.duckdb · fact_runs)"
+step "7/8  Building DuckDB analytics DB (db/linewise.duckdb · fact_runs)"
 if [ -f "$DUCKDB" ] && [ "$REBUILD_DUCK" -eq 0 ]; then
   ok "$DUCKDB already exists (use --rebuild-duck to rebuild from Excels)"
 else
-  command -v python3 >/dev/null 2>&1 || fail "python3 not found — needed to (re)build $DUCKDB"
-  if ! python3 -c "import duckdb, pandas, openpyxl" 2>/dev/null; then
-    warn "python3 is missing duckdb/pandas/openpyxl."
-    cat <<EOF
-${C_DIM}  Install them in a venv:
-    python3 -m venv .venv && source .venv/bin/activate
-    pip install duckdb pandas openpyxl
-  …then re-run ./start.sh
-${C_RESET}
-EOF
-    fail "DuckDB cannot be built without these Python packages."
-  fi
   mkdir -p "$ROOT/db" "$ROOT/parquet"
-  python3 "$ROOT/scripts/01_ingest.py"
-  python3 "$ROOT/scripts/03_derived_tables.py"
+  python "$ROOT/scripts/01_ingest.py"
+  python "$ROOT/scripts/03_derived_tables.py"
   ok "DuckDB rebuilt — chart-builder will see fresh data"
 fi
 
-# ── 6. servers ───────────────────────────────────────────────────────────────
+# ── 8. servers ───────────────────────────────────────────────────────────────
 if [ "$SETUP_ONLY" -eq 1 ]; then
-  printf "\n${C_BOLD}${C_GREEN}✓ Setup complete.${C_RESET} Launch manually with: ${C_BOLD}cd web && npm run dev${C_RESET}\n"
+  printf "\n${C_BOLD}${C_GREEN}✓ Setup complete.${C_RESET} Launch manually with: ${C_BOLD}cd web && npm run dev:full${C_RESET}\n"
   exit 0
 fi
 
 cd "$WEB"
 
-# Free port 3000 if a previous run is still bound.
-if lsof -i :3000 -t >/dev/null 2>&1; then
-  warn "port 3000 already in use — killing the old process"
-  lsof -i :3000 -t | xargs -r kill -9 || true
-fi
+# Free ports if a previous run is still bound. 3000 = Next, 8001 = sidecar.
+for port in 3000 8001; do
+  if lsof -i :$port -t >/dev/null 2>&1; then
+    warn "port $port already in use — killing the old process"
+    lsof -i :$port -t | xargs -r kill -9 || true
+  fi
+done
 
 STUDIO_PID=""
 cleanup() {
@@ -153,7 +194,7 @@ if [ "$NO_STUDIO" -eq 0 ]; then
   if lsof -i :5555 -t >/dev/null 2>&1; then
     warn "port 5555 already in use — skipping Prisma Studio launch"
   else
-    step "5/5  Launching Prisma Studio on http://localhost:5555 (background)"
+    step "8/8  Launching Prisma Studio on http://localhost:5555 (background)"
     BROWSER=none npx --yes prisma studio --browser none >/tmp/prisma-studio.log 2>&1 &
     STUDIO_PID=$!
     ok "Prisma Studio pid=$STUDIO_PID — visualises SavedChart, Sku, OfHecho, Plan, …"
@@ -161,9 +202,12 @@ if [ "$NO_STUDIO" -eq 0 ]; then
   fi
 fi
 
-step "Launching Next dev server"
-printf "${C_DIM}  Dashboard      http://localhost:3000/observabilidad${C_RESET}\n"
-[ "$NO_STUDIO" -eq 0 ] && printf "${C_DIM}  Prisma Studio  http://localhost:5555${C_RESET}\n"
-printf "${C_DIM}  Ctrl+C to stop both${C_RESET}\n\n"
+step "Launching Next dev server + LineWise model sidecar (concurrently)"
+printf "${C_DIM}  Dashboard       http://localhost:3000/observabilidad${C_RESET}\n"
+printf "${C_DIM}  Model sidecar   http://localhost:8001 (FastAPI)${C_RESET}\n"
+[ "$NO_STUDIO" -eq 0 ] && printf "${C_DIM}  Prisma Studio   http://localhost:5555${C_RESET}\n"
+printf "${C_DIM}  Ctrl+C to stop everything${C_RESET}\n\n"
 
-npm run dev
+# `npm run dev:full` runs `npm run dev` and `npm run model` concurrently.
+# The venv is activated above so the model subprocess finds fastapi/uvicorn.
+npm run dev:full
