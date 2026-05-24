@@ -21,9 +21,27 @@ const ISO_RE = /^\d{4}-\d{2}-\d{2}$/;
 const MEASURE_KEYS = MEASURE_LIST.map((m) => m.key);
 const DIM_KEYS = DIMENSION_LIST.map((d) => d.key);
 
+const refuseTool = {
+  name: 'refuse_off_topic',
+  description:
+    'Úsala SOLO cuando la pregunta del usuario no tenga relación con la producción cervecera de Damm (OEE, paros, cambios de formato, mantenimiento, volumen, líneas L14/L17/L19, marcas, formatos, canales, plan vs real, limpieza/CIP, etc.). NUNCA la uses para preguntas legítimas sobre estos temas.',
+  input_schema: {
+    type: 'object' as const,
+    additionalProperties: false,
+    required: ['reason'],
+    properties: {
+      reason: {
+        type: 'string',
+        description:
+          'Frase corta en español (≤ 25 palabras) explicando que la pregunta queda fuera del alcance de LineWise.',
+      },
+    },
+  },
+};
+
 const buildChartTool = {
   name: 'build_chart',
-  description: 'Construye una configuración de gráfico para el constructor de Observabilidad.',
+  description: 'Construye una configuración de gráfico para el constructor de Observabilidad de LineWise.',
   input_schema: {
     type: 'object' as const,
     additionalProperties: false,
@@ -70,10 +88,21 @@ function buildSystemPrompt(): string {
     (d) => `- ${d.key} — ${d.label} (${d.temporal ? 'temporal' : 'categórica'})`,
   ).join('\n');
 
-  return `Eres un asistente que traduce preguntas en español sobre producción cervecera a configuraciones de gráficos (ChartConfig). El usuario trabaja en la planta Damm (líneas L14, L17, L19) y consulta OEE, paros, cambios de formato, mantenimiento y volumen por línea, marca, formato, canal, etc.
+  return `Eres el asistente de **LineWise**, la herramienta interna de planificación y observabilidad de la planta Damm. Tu único trabajo es traducir preguntas en español sobre la producción cervecera de Damm (líneas L14, L17, L19) a configuraciones de gráficos (ChartConfig) que el constructor de la app renderizará.
+
+Ámbito de LineWise (lo que SÍ puedes ayudar):
+- OEE, disponibilidad, rendimiento, ineficiencia, utilización.
+- Volumen (hl / unidades), nº de OFs, % de OFs con cambio, frecuencia de cambio.
+- Horas: marcha, paro, PNP, IDLE, baja velocidad, saturación salida, falta producto, limpieza, CIP, esterilización, cambio.
+- Mantenimiento: llamadas, horas de intervención, horas de espera.
+- Cambios: tipo principal, dimensiones cambiadas, real vs teórico.
+- Cortes por: línea (L14/L17/L19), marca, formato, familia, tipo de envase, canal, SKU, turno, causa de paro, día/semana/mes.
+- Plan vs Real, comparativas por periodo.
 
 Reglas duras:
-- DEBES llamar a la herramienta \`build_chart\` exactamente una vez.
+- Si la pregunta entra en el ámbito, DEBES llamar exactamente una vez a \`build_chart\`.
+- Si la pregunta NO trata sobre la producción cervecera de Damm (saludos sociales, chistes, política, programación, gastronomía, recetas, deportes, etc.), DEBES llamar a \`refuse_off_topic\` y nada más. No inventes un gráfico para temas fuera de alcance.
+- Antes de la llamada a \`build_chart\` puedes añadir UNA frase corta (≤ 25 palabras) en español explicando qué vas a construir. Nada más.
 - Antes de la llamada puedes añadir UNA frase corta (≤ 25 palabras) en español explicando qué vas a construir. Nada más.
 - Usa únicamente las claves de métrica y dimensión listadas abajo. No inventes claves.
 - Evolución temporal → \`dimension\` temporal (típicamente 'mesIso') + \`viz: 'line'\`. Ajusta \`granularity\` a 'day' | 'week' | 'month' según la palabra usada (día/diaria, semana/semanal, mes/mensual).
@@ -205,20 +234,28 @@ interface ContentBlock {
   input?: unknown;
 }
 
-function extractToolCall(blocks: ContentBlock[]): { input: unknown; explanation: string } | null {
+interface ToolCall {
+  tool: 'build_chart' | 'refuse_off_topic';
+  input: unknown;
+  explanation: string;
+}
+
+function extractToolCall(blocks: ContentBlock[]): ToolCall | null {
   let explanation = '';
+  let toolName: ToolCall['tool'] | null = null;
   let input: unknown = null;
   for (const b of blocks) {
     if (b.type === 'text' && typeof b.text === 'string' && !explanation) {
       explanation = b.text.trim();
     }
-    if (b.type === 'tool_use' && b.name === 'build_chart') {
+    if (b.type === 'tool_use' && (b.name === 'build_chart' || b.name === 'refuse_off_topic')) {
+      toolName = b.name;
       input = b.input;
     }
   }
-  if (!input) return null;
+  if (!toolName) return null;
   if (explanation.length > 240) explanation = explanation.slice(0, 237) + '…';
-  return { input, explanation };
+  return { tool: toolName, input, explanation };
 }
 
 export async function POST(req: Request) {
@@ -266,8 +303,8 @@ export async function POST(req: Request) {
       model: getModel(),
       max_tokens: 1024,
       system: buildSystemPrompt(),
-      tools: [buildChartTool],
-      tool_choice: { type: 'tool', name: 'build_chart' },
+      tools: [buildChartTool, refuseTool],
+      tool_choice: { type: 'any' },
       messages: [{ role: 'user', content: userContent }],
     });
   } catch (err: unknown) {
@@ -307,6 +344,20 @@ export async function POST(req: Request) {
     return NextResponse.json(
       { error: 'no_tool_call', message: 'Claude no devolvió una configuración válida. Reformula la pregunta.' },
       { status: 500 },
+    );
+  }
+
+  if (tool.tool === 'refuse_off_topic') {
+    const reasonRaw = (tool.input as { reason?: unknown })?.reason;
+    const reason = typeof reasonRaw === 'string' && reasonRaw.trim()
+      ? reasonRaw.trim()
+      : 'Esa pregunta queda fuera del alcance de LineWise.';
+    return NextResponse.json(
+      {
+        error: 'off_topic',
+        message: `${reason} LineWise solo ayuda con la producción cervecera de Damm: OEE, paros, cambios, volumen, mantenimiento, plan vs real, etc.`,
+      },
+      { status: 422 },
     );
   }
 

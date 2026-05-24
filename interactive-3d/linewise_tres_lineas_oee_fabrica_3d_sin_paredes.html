@@ -120,37 +120,29 @@ html,body{margin:0;padding:0;background:#05080f;height:100%;overflow:hidden}
   const scene=new THREE.Scene();scene.fog=new THREE.FogExp2(0x070c16,0.012);
   const camera=new THREE.PerspectiveCamera(48,W()/H(),0.1,400);
   const renderer=new THREE.WebGLRenderer({antialias:true,alpha:false});
-  renderer.setClearColor(0x05080f,1);renderer.setPixelRatio(Math.min(devicePixelRatio,2));renderer.setSize(W(),H());
+  renderer.setClearColor(0x05080f,1);renderer.setPixelRatio(Math.min(devicePixelRatio,1.5));renderer.setSize(W(),H());
   renderer.toneMapping=THREE.ACESFilmicToneMapping; renderer.toneMappingExposure=1.35;
   renderer.outputEncoding=THREE.sRGBEncoding;
-  renderer.shadowMap.enabled=true; renderer.shadowMap.type=THREE.PCFSoftShadowMap;
+  renderer.shadowMap.enabled=true; renderer.shadowMap.type=THREE.PCFShadowMap;
   renderer.physicallyCorrectLights=true;
   holder.appendChild(renderer.domElement);
   scene.background=new THREE.Color(0x14191f); // dark, HDRI used for IBL only
 
-  // Post-processing: SSAO + bloom + FXAA (graceful fallback if scripts didn't load)
+  // Post-processing: bloom only. SSAO and FXAA dropped for perf — renderer already has antialias.
   let composer=null, ssaoPass=null, bloomPass=null, fxaaPass=null;
-  if(THREE.EffectComposer && THREE.UnrealBloomPass && THREE.ShaderPass && THREE.FXAAShader){
+  if(THREE.EffectComposer && THREE.UnrealBloomPass){
     composer=new THREE.EffectComposer(renderer);
     composer.addPass(new THREE.RenderPass(scene,camera));
-    if(THREE.SSAOPass){
-      ssaoPass=new THREE.SSAOPass(scene,camera,W(),H());
-      ssaoPass.kernelRadius=8; ssaoPass.minDistance=0.005; ssaoPass.maxDistance=0.12;
-      composer.addPass(ssaoPass);
-    }
-    bloomPass=new THREE.UnrealBloomPass(new THREE.Vector2(W(),H()),0.35,0.32,0.85);
+    bloomPass=new THREE.UnrealBloomPass(new THREE.Vector2(W()*0.5,H()*0.5),0.25,0.32,0.85);
     composer.addPass(bloomPass);
-    fxaaPass=new THREE.ShaderPass(THREE.FXAAShader);
-    fxaaPass.material.uniforms.resolution.value.set(1/(W()*renderer.getPixelRatio()),1/(H()*renderer.getPixelRatio()));
-    composer.addPass(fxaaPass);
   }
 
   // Key + rim lights; HDRI handles fill via scene.environment (loaded async).
   const sun=new THREE.DirectionalLight(0xfff1d4,3.4);sun.position.set(18,30,14);
-  sun.castShadow=true; sun.shadow.mapSize.set(2048,2048);
-  sun.shadow.camera.left=-36; sun.shadow.camera.right=36;
-  sun.shadow.camera.top=26; sun.shadow.camera.bottom=-26;
-  sun.shadow.camera.near=4; sun.shadow.camera.far=80;
+  sun.castShadow=true; sun.shadow.mapSize.set(1024,1024);
+  sun.shadow.camera.left=-28; sun.shadow.camera.right=28;
+  sun.shadow.camera.top=20; sun.shadow.camera.bottom=-20;
+  sun.shadow.camera.near=4; sun.shadow.camera.far=60;
   sun.shadow.bias=-0.0005; sun.shadow.normalBias=0.04;
   scene.add(sun);
   const rim=new THREE.DirectionalLight(0x9ccff5,1.1); rim.position.set(-22,16,-10); scene.add(rim);
@@ -161,14 +153,14 @@ html,body{margin:0;padding:0;background:#05080f;height:100%;overflow:hidden}
   const boot_ambient=ambient_fill; // alias so bootScene's existing removal noops
 
   // Overhead practical lights — paired with the ceiling tubes for plausible illumination
-  for(let i=-3;i<=3;i++){
+  for(let i=-3;i<=3;i+=2){
     const pl=new THREE.PointLight(0xfff0d8, 4.2, 38, 1.4);
     pl.position.set(0, 14.6, i*7);
     scene.add(pl);
   }
   // Side fill point-lights along the long walls (cool fill so metals read 3D)
   [-22, 22].forEach(x=>{
-    for(let z=-18; z<=18; z+=9){
+    for(let z=-18; z<=18; z+=12){
       const pl=new THREE.PointLight(0xb5d8ff, 1.8, 26, 1.6);
       pl.position.set(x, 7, z);
       scene.add(pl);
@@ -490,6 +482,7 @@ html,body{margin:0;padding:0;background:#05080f;height:100%;overflow:hidden}
       sys.age[i]=0;
       sys.colors[i*3]=1; sys.colors[i*3+1]=0.96; sys.colors[i*3+2]=0.77;
     }
+    sys.allDead=false;
     sys.pts.geometry.attributes.position.needsUpdate=true;
     sys.pts.geometry.attributes.color.needsUpdate=true;
   }
@@ -745,6 +738,7 @@ html,body{margin:0;padding:0;background:#05080f;height:100%;overflow:hidden}
   const ray=new THREE.Raycaster(),mv=new THREE.Vector2(),panel=document.getElementById('panel');let selected=null;
 
   function show(s){
+    if(selected && selected!==s && selected.pad) selected.pad.material.opacity=selected.padBase;
     selected=s;panel.style.display='block';
     const st=statusOf(s.oee);
     document.getElementById('p-name').textContent=s.name;
@@ -1166,39 +1160,54 @@ html,body{margin:0;padding:0;background:#05080f;height:100%;overflow:hidden}
     // per-line LED indicator (subtle brand cue, picked up by bloom)
     Object.keys(lineGlow).forEach(lk=>{
       const lg=lineGlow[lk];
-      lg.ledMat.color.lerp(lg.activeColor, 0.08);
-      lg.ledMat.emissive.lerp(lg.activeColor, 0.08);
+      // Snap color when close enough so we stop lerping every frame forever
+      const c=lg.ledMat.color, ac=lg.activeColor;
+      const d=Math.abs(c.r-ac.r)+Math.abs(c.g-ac.g)+Math.abs(c.b-ac.b);
+      if(d>0.003){
+        c.lerp(ac,0.08);
+        lg.ledMat.emissive.lerp(ac,0.08);
+      } else if(d>0){
+        c.copy(ac); lg.ledMat.emissive.copy(ac);
+      }
       if(lg.isActive){lg.ledMat.emissiveIntensity=2.4 + 1.0*Math.sin(tm*1.8 + (lk==='L14'?0:lk==='L17'?2.1:4.2));}
-      else {lg.ledMat.emissiveIntensity=0.05;}
+      else if(lg.ledMat.emissiveIntensity!==0.05){lg.ledMat.emissiveIntensity=0.05;}
     });
 
-    // pad pulsing + per-station changeover flash overlay
+    // pad pulsing + per-station changeover flash overlay.
+    // Iterate only the sparse flashState + the single selected station instead of
+    // walking all 33 station refs every frame.
     const nowMs=performance.now();
-    Object.keys(stationByLine).forEach(lineKey=>{
-      const line=stationByLine[lineKey];
-      Object.keys(line).forEach(stk=>{
-        const s=line[stk];
-        const pl=0.7+0.3*Math.sin(tm*2.4);
-        const flashExp=flashState[lineKey+'|'+stk];
-        if(flashExp){
-          if(nowMs<flashExp){
-            const pulse=0.7+0.3*Math.abs(Math.sin(tm*8.0));
-            s.pad.material.color.copy(FLASH_COLOR);
-            s.pad.material.opacity=Math.min(0.95,0.55+0.4*pulse);
-          } else {
-            delete flashState[lineKey+'|'+stk];
-            recolorStation(s,s.oee);
-          }
-        } else {
-          s.pad.material.opacity=(s===selected)?Math.min(0.95,s.padBase+0.3+0.18*pl):s.padBase;
-        }
-      });
-    });
+    let selectedFlashed=false;
+    for(const fk in flashState){
+      const exp=flashState[fk];
+      const sep=fk.indexOf('|');
+      const lineKey=fk.slice(0,sep), stk=fk.slice(sep+1);
+      const lineMap=stationByLine[lineKey];
+      const s=lineMap&&lineMap[stk];
+      if(!s) continue;
+      if(nowMs<exp){
+        const pulse=0.7+0.3*Math.abs(Math.sin(tm*8.0));
+        s.pad.material.color.copy(FLASH_COLOR);
+        s.pad.material.opacity=Math.min(0.95,0.55+0.4*pulse);
+        if(s===selected) selectedFlashed=true;
+      } else {
+        delete flashState[fk];
+        recolorStation(s,s.oee);
+        s.pad.material.opacity=s.padBase;
+      }
+    }
+    if(selected && !selectedFlashed){
+      const pl=0.7+0.3*Math.sin(tm*2.4);
+      selected.pad.material.opacity=Math.min(0.95,selected.padBase+0.3+0.18*pl);
+    }
 
-    // particles (steam + sparks)
+    // particles (steam + sparks) — skip the per-particle loop and GPU buffer
+    // re-upload entirely when the line is idle AND no particles are still alive.
     const dt=tickDt;
     Object.keys(steamSystems).forEach(lk=>{
       const sys=steamSystems[lk]; const active=(lineSpeedMult[lk]||0)>0.01;
+      if(!active && sys.allDead) return;
+      let anyAlive=false;
       for(let i=0;i<sys.N;i++){
         sys.age[i]+=dt*1.1;
         if(sys.age[i]>=sys.maxAge[i]){
@@ -1210,9 +1219,12 @@ html,body{margin:0;padding:0;background:#05080f;height:100%;overflow:hidden}
             sys.vel[i]={x:(Math.random()-0.5)*0.45, y:0.45+Math.random()*0.35, z:(Math.random()-0.5)*0.45};
             sys.age[i]=0;
             sys.maxAge[i]=1.4+Math.random()*1.1;
+            anyAlive=true;
           } else {
             sys.colors[i*3]=0;sys.colors[i*3+1]=0;sys.colors[i*3+2]=0; continue;
           }
+        } else {
+          anyAlive=true;
         }
         sys.positions[i*3]+=sys.vel[i].x*dt;
         sys.positions[i*3+1]+=sys.vel[i].y*dt;
@@ -1221,13 +1233,17 @@ html,body{margin:0;padding:0;background:#05080f;height:100%;overflow:hidden}
         const f=fade*fade*0.85;
         sys.colors[i*3]=0.78*f; sys.colors[i*3+1]=0.86*f; sys.colors[i*3+2]=f;
       }
+      sys.allDead=!active && !anyAlive;
       sys.pts.geometry.attributes.position.needsUpdate=true;
       sys.pts.geometry.attributes.color.needsUpdate=true;
     });
     Object.keys(sparkSystems).forEach(lk=>{
       const sys=sparkSystems[lk];
+      if(sys.allDead) return;
+      let anyAlive=false;
       for(let i=0;i<sys.N;i++){
         if(sys.age[i]>=sys.maxAge){sys.colors[i*3]=0;sys.colors[i*3+1]=0;sys.colors[i*3+2]=0;continue;}
+        anyAlive=true;
         sys.age[i]+=dt;
         sys.positions[i*3]+=sys.vel[i].x*dt;
         sys.positions[i*3+1]+=sys.vel[i].y*dt;
@@ -1236,6 +1252,7 @@ html,body{margin:0;padding:0;background:#05080f;height:100%;overflow:hidden}
         const fade=Math.max(0,1-sys.age[i]/sys.maxAge);
         sys.colors[i*3]=fade; sys.colors[i*3+1]=0.96*fade; sys.colors[i*3+2]=0.77*fade;
       }
+      sys.allDead=!anyAlive;
       sys.pts.geometry.attributes.position.needsUpdate=true;
       sys.pts.geometry.attributes.color.needsUpdate=true;
     });
@@ -1277,7 +1294,7 @@ html,body{margin:0;padding:0;background:#05080f;height:100%;overflow:hidden}
     t.wrapS=t.wrapT=THREE.RepeatWrapping;
     t.repeat.set(repX, repY||repX);
   }
-  function bootScene(){
+  function patchAssets(){
     try {
       // remove the temporary boot ambient — HDRI + key + rim now carry the scene
       scene.remove(boot_ambient);
@@ -1322,33 +1339,83 @@ html,body{margin:0;padding:0;background:#05080f;height:100%;overflow:hidden}
           n.material.envMapIntensity = (n.material.metalness||0) >= 0.5 ? 1.8 : 1.3;
         }
       });
-      // Fade out the loading overlay
-      const ovl=document.getElementById('lw-loading');
-      if(ovl){ ovl.style.opacity='0'; setTimeout(()=>{ovl.style.display='none';}, 550); }
+      // Subtle phase-color tints on each station type so the process flow reads.
+      // Grouped into 5 phases — kept mild (multiplies the painted-metal texture).
+      const PHASE_TINT = {
+        cip:  0x7aa9d8, rin:  0x7aa9d8, fill: 0x7aa9d8,   // liquid prep — cool blue
+        cod:  0xd47ba8,                                    // coding — pink
+        pas:  0xe09a64,                                    // pasteurization — warm peach
+        lev:  0x7ac8a4, vac:  0x7ac8a4,                    // inspection — mint
+        pak:  0xb8b870, ctn:  0xb8b870, pal:  0xb8b870, wrp: 0xb8b870, // packaging — sage
+      };
+      const _tintBody = {}, _tintDark = {};
+      function tintedFor(cache, base, stk, scale){
+        if(!_tint(stk)) return base;
+        if(!cache[stk]){
+          const m = base.clone();
+          m.color = new THREE.Color(PHASE_TINT[stk]);
+          if(scale) m.color.multiplyScalar(scale);
+          cache[stk] = m;
+        }
+        return cache[stk];
+      }
+      function _tint(stk){ return !!PHASE_TINT[stk]; }
+      machineGroups.forEach(g=>{
+        const stk = g.userData.station && g.userData.station.stationKey;
+        if(!_tint(stk)) return;
+        g.traverse(n=>{
+          if(!n.isMesh) return;
+          if(n.material === mBody) n.material = tintedFor(_tintBody, mBody, stk);
+          else if(n.material === mDark) n.material = tintedFor(_tintDark, mDark, stk, 0.5);
+        });
+      });
+      // Small phase "puck" on top of each station so the color reads from above
+      const _puckGeom = new THREE.CylinderGeometry(0.22, 0.22, 0.06, 24);
+      machineGroups.forEach(g=>{
+        const sObj = g.userData.station;
+        if(!sObj) return;
+        const hex = PHASE_TINT[sObj.stationKey]; if(!hex) return;
+        const m = new THREE.MeshStandardMaterial({
+          color: hex, emissive: hex, emissiveIntensity: 0.45,
+          metalness: 0.1, roughness: 0.55
+        });
+        const puck = new THREE.Mesh(_puckGeom, m);
+        puck.position.set(sObj.x, (sObj.top || 2) + 0.05, g.userData.lineZ);
+        scene.add(puck);
+      });
     } catch(e){
-      console.warn('[lw] bootScene patch failed', e);
+      console.warn('[lw] patchAssets failed', e);
     }
-    loop();
+  }
+  function hideOverlay(){
+    const ovl=document.getElementById('lw-loading');
+    if(ovl && ovl.style.opacity!=='0'){ ovl.style.opacity='0'; setTimeout(()=>{ovl.style.display='none';}, 550); }
   }
 
-  // _bootArmed is set true once bootScene is reachable; safeBoot called from
-  // multiple places (onLoad, fallback timer, or immediately if all assets already done).
-  let _booted=false;
-  window.__lwSafeBoot=function safeBoot(){if(_booted)return; _booted=true; bootScene();};
-  // Replace the earlier onLoad attachment with one that knows about bootScene.
-  manager.onLoad=window.__lwSafeBoot;
+  // Split boot into two phases so the user sees the scene immediately while
+  // the 6.6 MB HDRI + PBR textures finish downloading in the background.
+  // Phase 1 (startRender): kick off the render loop ASAP with the fallback
+  // ambient + key + rim lighting. Phase 2 (patchAssets): swap in textures +
+  // env intensity once the LoadingManager reports done. Idempotent guards
+  // make it safe to fire either path more than once.
+  let _rendering=false, _patched=false;
+  function startRender(){if(_rendering)return; _rendering=true; hideOverlay(); loop();}
+  function applyAssets(){if(_patched)return; _patched=true; patchAssets(); startRender();}
+  // Back-compat for any external caller (window.__lwSafeBoot was the old name).
+  window.__lwSafeBoot=applyAssets;
+  manager.onLoad=applyAssets;
   // If everything already loaded before we got here (LoadingManager misses the
   // event if onLoad wasn't set at the time itemsLoaded reached itemsTotal):
-  if(manager.isLoading===false){ window.__lwSafeBoot(); }
-  // Fall back after 4s for any other edge case
-  setTimeout(()=>{ if(!_booted){console.warn('[lw] asset loader timeout — booting with defaults'); window.__lwSafeBoot();} }, 4000);
+  if(manager.isLoading===false){ applyAssets(); }
+  // Show the scene fast — render starts even if HDRI is still downloading.
+  setTimeout(startRender, 400);
+  // Safety net in case both onLoad and onError silently drop.
+  setTimeout(applyAssets, 8000);
 
   window.addEventListener('resize',()=>{
     camera.aspect=W()/H();camera.updateProjectionMatrix();renderer.setSize(W(),H());
     if(composer)composer.setSize(W(),H());
-    if(bloomPass)bloomPass.setSize(W(),H());
-    if(ssaoPass)ssaoPass.setSize(W(),H());
-    if(fxaaPass)fxaaPass.material.uniforms.resolution.value.set(1/(W()*renderer.getPixelRatio()),1/(H()*renderer.getPixelRatio()));
+    if(bloomPass)bloomPass.setSize(W()*0.5,H()*0.5);
   });
 })();
 </script>
