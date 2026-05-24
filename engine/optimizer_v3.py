@@ -65,8 +65,14 @@ def optimize_plan_v3(
     top_k_prevs: int = 20,
     outages: list[dict] | None = None,
     priority_ofs: list[dict] | None = None,
+    replan_from_ts: str | pd.Timestamp | None = None,
 ) -> dict[str, Any]:
-    """V3 cascade-aware optimizer with operational reasoning + incidencias."""
+    """V3 cascade-aware optimizer with operational reasoning + incidencias.
+
+    `replan_from_ts`: when set, OFs whose scheduled start_ts is before this
+    timestamp are pinned to their original slot (mid-week replan — already
+    produced or in-progress, cannot be moved). When None (default), every OF
+    is rearrangeable (initial planning mode)."""
     t0 = time.time()
 
     if blocks.empty:
@@ -84,6 +90,7 @@ def optimize_plan_v3(
 
     jobs, slots, jobs_by_id, slots_by_id = build_jobs_and_slots(
         blocks, lookups_dir, outages=outages, priority_ofs=priority_ofs,
+        replan_from_ts=replan_from_ts,
     )
     if not jobs or not slots:
         return _empty_result()
@@ -129,12 +136,24 @@ def optimize_plan_v3(
     pinned: set[str]   = set()
     displaced: set[str] = set()      # baseline jobs ejected by priority insert
     swap_log: list[dict] = []
+
+    # Mid-week replan: pin every OF that started before replan_from_ts so the
+    # local search and eviction logic cannot touch it. Frozen jobs keep their
+    # original assignment and contribute to scores as-is.
+    frozen_jobs = [j for j in jobs if j.is_frozen]
+    for fj in frozen_jobs:
+        pinned.add(fj.job_id)
+
     incidencias: dict[str, Any] = {
         "outages_applied":          list(outages or []),
         "priority_ofs_requested":   list(priority_ofs or []),
         "priority_ofs_placed":      0,
         "priority_ofs_failed":      [],
         "evictions":                0,
+        "frozen_count":             len(frozen_jobs),
+        "frozen_hl":                int(sum(j.hl for j in frozen_jobs)),
+        "replan_from_ts":           (pd.Timestamp(replan_from_ts).isoformat()
+                                     if replan_from_ts else None),
     }
 
     # ============================================================
@@ -489,8 +508,12 @@ def _place_priority_job(
     # Second pass: evict from the highest-scoring candidate slot
     target_score, target_slot = candidates[0]
     occupants = [jid for jid, sid in assignment.items() if sid == target_slot.slot_id]
-    # Pick lowest-(score × hl) occupant; skip pinned ones (already-priority)
-    occupants = [jid for jid in occupants if not jobs_by_id[jid].is_priority]
+    # Pick lowest-(score × hl) occupant; skip priority OFs AND frozen OFs
+    # (frozen = already produced or in-progress, cannot be evicted)
+    occupants = [
+        jid for jid in occupants
+        if not jobs_by_id[jid].is_priority and not jobs_by_id[jid].is_frozen
+    ]
     if not occupants:
         return target_slot.slot_id, None
     def _victim_key(jid: str) -> tuple[float, str]:

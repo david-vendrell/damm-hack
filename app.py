@@ -45,6 +45,7 @@ def _optimize_pipeline_v3(
     objective: str,
     outages: list[dict] | None = None,
     priority_ofs: list[dict] | None = None,
+    replan_from_ts: str | None = None,
 ) -> tuple[dict, dict]:
     blocks, meta = parse_planning_excel(xlsx_file, FEASIBILITY)
     if blocks.empty:
@@ -62,6 +63,7 @@ def _optimize_pipeline_v3(
         top_k_prevs=10,        # was 20 — halves lookup size + precompute time
         outages=outages,
         priority_ofs=priority_ofs,
+        replan_from_ts=replan_from_ts,
     )
     return result, meta
 
@@ -304,16 +306,23 @@ def _compute_incident_cost(
     outages: list[dict],
     priority_ofs: list[dict],
     full_result: dict,
+    replan_from_ts: str | None = None,
 ) -> dict | None:
     """Run the optimizer a second time WITHOUT incidents and diff against
     the full result so we can show the planner the true cost.
+
+    The clean pass MUST use the same `replan_from_ts` as the full pass so
+    that the frozen baseline (already-produced OFs) stays identical — the
+    cost is computed only against the rearrangeable remainder.
 
     Returns None when no incidents are declared (nothing to compare).
     """
     if not (outages or priority_ofs):
         return None
     try:
-        clean_result, _ = _optimize_pipeline_v3(path, objective, [], [])
+        clean_result, _ = _optimize_pipeline_v3(
+            path, objective, [], [], replan_from_ts=replan_from_ts,
+        )
     except Exception as exc:
         return {"error": f"clean pass failed: {exc}"}
     if not clean_result or clean_result.get("best_blocks", pd.DataFrame()).empty:
@@ -549,6 +558,7 @@ def optimize_v3(
     aggressive: bool,
     outages_json: str = "",
     priority_ofs_json: str = "",
+    replan_from_ts: str = "",
     progress=gr.Progress(track_tqdm=False),
 ):
     empty = pd.DataFrame()
@@ -565,10 +575,20 @@ def optimize_v3(
     if err2:
         return (f"❌ {err2}", empty, empty, empty)
 
+    # Mid-week replan: timestamp must parse if non-empty; null/empty → initial planning
+    replan_ts_param: str | None = None
+    if replan_from_ts and replan_from_ts.strip():
+        try:
+            replan_ts_param = pd.Timestamp(replan_from_ts.strip()).isoformat()
+        except Exception as exc:
+            return (f"❌ replan_from_ts no es timestamp válido: {exc}", empty, empty, empty)
+
     progress(0.05, desc=f"Parseando Excel (modo {obj_label})…")
     try:
         progress(0.15, desc="Construyendo lookup prev-aware (~30s)…")
-        result, meta = _optimize_pipeline_v3(path, objective, outages, priority_ofs)
+        result, meta = _optimize_pipeline_v3(
+            path, objective, outages, priority_ofs, replan_ts_param,
+        )
     except Exception as exc:
         return (f"❌ Error optimizando: {exc}", empty, empty, empty)
 
@@ -580,7 +600,10 @@ def optimize_v3(
             and not result["best_blocks"].empty:
         try:
             progress(0.85, desc="Calculando coste de las incidencias…")
-            cost_info = _compute_incident_cost(path, objective, outages, priority_ofs, result)
+            cost_info = _compute_incident_cost(
+                path, objective, outages, priority_ofs, result,
+                replan_from_ts=replan_ts_param,
+            )
         except Exception as exc:
             cost_info = {"error": str(exc)}
 
@@ -623,6 +646,19 @@ def optimize_v3(
     cost_md = _cost_analysis_section(
         cost_info, outages, priority_ofs, result.get("incidencias", {})
     )
+    # Mid-week replan header — shown only if the planner passed a replan_from_ts
+    replan_md = ""
+    if replan_ts_param:
+        inc = result.get("incidencias", {})
+        n_frozen = int(inc.get("frozen_count", 0))
+        hl_frozen = int(inc.get("frozen_hl", 0))
+        replan_md = (
+            f"\n#### 🔒 Replanificación desde {replan_ts_param}\n\n"
+            f"- **{n_frozen} OF(s) congelado(s)** ({hl_frozen:,} HL ya producidos "
+            f"o en curso) — el optimizador no los toca.\n"
+            f"- El optimizador sólo reorganiza los OFs **posteriores al "
+            f"momento del replán**.\n"
+        )
 
     # Build per-línea diagnostic markdown (with Simpson's-paradox note)
     per_line_md_rows = []
@@ -651,7 +687,7 @@ def optimize_v3(
 - **{total_hl:,} HL** totales planificados (incluye OF(s) prioritario(s) si los hay)
 - Modo: **{obj_label}**
 {mant_line}
-{incidencias_md}{cost_md}
+{replan_md}{incidencias_md}{cost_md}
 #### Detalle operacional
 {weekly}
 
@@ -744,6 +780,16 @@ with gr.Blocks(
                     placeholder='[{"sku": "ED13LTW", "hl": 250, "deadline": "2026-05-28", "reason": "Pedido urgente cliente X"}]',
                     lines=3,
                 )
+                replan_from_ts_in = gr.Textbox(
+                    label="🔒 Replan desde — timestamp ISO (opcional, mid-week)",
+                    placeholder="2026-05-27T10:00:00   (vacío = planificación inicial, sin OFs congelados)",
+                    lines=1,
+                    info=(
+                        "Cuando se especifica, los OFs cuyo start_ts es anterior a "
+                        "este momento se PINEAN (no se mueven): ya están producidos "
+                        "o en curso. El optimizador sólo replanifica los OFs futuros."
+                    ),
+                )
             gr.Markdown(
                 "> El sistema usa un modelo **LightGBM quantile** entrenado con "
                 "~2 200 OFs históricos de 2025. **`p90`** = techo de OEE razonablemente "
@@ -787,7 +833,7 @@ with gr.Blocks(
     )
     btn_optimize.click(
         fn=optimize_v3,
-        inputs=[file_in, aggressive, outages_in, priority_ofs_in],
+        inputs=[file_in, aggressive, outages_in, priority_ofs_in, replan_from_ts_in],
         outputs=[opt_summary, opt_day_tbl, opt_line_tbl, opt_swap_tbl],
     )
 
