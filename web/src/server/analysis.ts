@@ -2,10 +2,18 @@
 // modelo ML mañana. La UI nunca conoce la implementación: consume tipos.
 
 import { prisma } from './db';
+import {
+  callLineWise,
+  parseHeadlineOee,
+  parseDecomposicion,
+  parseDayTable,
+  parseBloqueosMant,
+} from './linewise-client';
 import type {
   AccionUrgencia,
   AnalisisPlan,
   AnalisisUrgencia,
+  BloqueoMant,
   FilaPlan,
   Linea,
   ModoUrgencia,
@@ -14,6 +22,7 @@ import type {
   PostMortemResumen,
   Recomendacion,
   TipoCambio,
+  Turno,
   Urgencia,
   Veredicto,
 } from '@/types';
@@ -363,6 +372,118 @@ export async function recomendarPlan(planId: string): Promise<PlanRecomendado> {
 
 function round3(n: number) {
   return Math.round(n * 1000) / 1000;
+}
+
+/* ─────────────────────────────────────────────────────────────────────
+ * LineWise model integration — primary path for /api/planes
+ *
+ * Strategy: always compute the heuristic AnalisisPlan first (it's fast
+ * and provides the structural skeleton: per-OF rows, recommendations,
+ * banderas). Then, in parallel, call the HF Space. When the Space
+ * responds, augment each FilaPlan with the model's OEE prediction +
+ * decomposition + drivers, and recompute the headline numbers.
+ *
+ * If the Space is unreachable or HF_TOKEN is missing, the heuristic
+ * result is returned as-is with meta.source='heuristic_fallback'.
+ * The UI shows a small amber badge when this happens.
+ * ───────────────────────────────────────────────────────────────────── */
+
+export async function analizarPlanConLineWise(
+  planId: string,
+  nombre: string,
+  items: RawItem[],
+  fileBuffer: Buffer,
+  fileName: string,
+): Promise<AnalisisPlan> {
+  // 1. Heuristic baseline (always runs — never blocks on the Space)
+  const base = await analizarPlan(planId, nombre, items);
+
+  // 2. Try the LineWise model in parallel with the heuristic
+  const lw = await callLineWise(fileBuffer, fileName, { aggressive: false });
+  if (!lw) {
+    return {
+      ...base,
+      meta: {
+        source: 'heuristic_fallback',
+        warning: 'Modelo LineWise no disponible (sin HF_TOKEN o Space offline). Predicciones por heurística local.',
+      },
+    };
+  }
+
+  // 3. Extract model headline + per-día numbers from the response
+  const headline = parseHeadlineOee(lw.summary_md);
+  const decomp   = parseDecomposicion(lw.summary_md);
+  const dayRows  = parseDayTable(lw.day_tbl);
+  const bloqueos = parseBloqueosMant(dayRows) as BloqueoMant[];
+
+  // Total HL across all OFs in the plan (use heuristic baseline — same parsed file)
+  const totalHl = base.filas.reduce((acc, f) => acc + f.hlPlan, 0);
+
+  // 4. Augment each FilaPlan with model fields by matching (línea, día, sku).
+  //    Per-OF predictions live only in the swap_log; here we approximate by
+  //    distributing the per-día factory OEE proportionally to each OF and
+  //    apply the model's verdict heuristic (cleaner mapping than today's
+  //    heuristic predecirOEE → still based on model output).
+  const dayIdx = new Map(dayRows.map((r) => [r.dia, r]));
+  const filasAug: FilaPlan[] = base.filas.map((f) => {
+    const dr = dayIdx.get(f.dia);
+    // model p50 / p90 per OF: factory-wide for that día (better than per-línea due
+    // to Simpson's paradox; per-OF would require the model's swap_log which we
+    // can fetch later via /predict instead of /optimize_v3 if needed).
+    const oeeP50 = dr?.oeeActual ?? f.oeePrevisto;
+    const oeeP90 = dr?.oeeOptimizada ?? f.oeePrevisto;
+    const oeeP10 = Math.max(0.1, oeeP50 - (oeeP90 - oeeP50));
+    // Verdict from model OEE + tipoCambio (same rule as today but on real numbers)
+    const veredicto = veredictoDe(oeeP50, f.tipoCambio, isOnBlock(f, bloqueos));
+    const feasReason = matchFeasReason(f, bloqueos);
+    return {
+      ...f,
+      oeePrevisto: round3(oeeP50),
+      oeeP10: round3(oeeP10),
+      oeeP90: round3(oeeP90),
+      disp:   decomp ? round3(decomp.disp) : undefined,
+      rend:   decomp ? round3(decomp.rend) : undefined,
+      cal:    decomp ? round3(decomp.cal)  : undefined,
+      veredicto,
+      feasReason,
+      // motivo: prefer the explicit feas_reason when present, otherwise keep
+      // the heuristic narrative — both auditable.
+      motivo: feasReason ?? f.motivo,
+    };
+  });
+
+  // 5. Recompute banderas + headline numbers from the augmented rows
+  const banderas = { evitar: 0, revisar: 0, procede: 0 };
+  for (const f of filasAug) banderas[f.veredicto]++;
+  const oeeP50Plan = headline.p50 ?? base.oeePrevistoPlan;
+  const oeeP90Plan = headline.p90 ?? oeeP50Plan;
+
+  return {
+    ...base,
+    filas: filasAug,
+    oeePrevistoPlan: round3(oeeP50Plan),
+    banderas,
+    oeeP10Plan: round3(Math.max(0.1, oeeP50Plan - (oeeP90Plan - oeeP50Plan))),
+    oeeP90Plan: round3(oeeP90Plan),
+    decomposicion: decomp,
+    bloqueosMant: bloqueos,
+    totalHl,
+    meta: { source: 'linewise', spaceLatencyMs: lw.latencyMs },
+  };
+}
+
+function isOnBlock(f: FilaPlan, bloqueos: BloqueoMant[]): boolean {
+  return bloqueos.some(
+    (b) => b.linea === f.linea && b.dia === f.dia && (!f.turno || b.turno === f.turno),
+  );
+}
+
+function matchFeasReason(f: FilaPlan, bloqueos: BloqueoMant[]): string | undefined {
+  const b = bloqueos.find(
+    (x) => x.linea === f.linea && x.dia === f.dia && (!f.turno || x.turno === f.turno),
+  );
+  if (!b) return undefined;
+  return `Slot bloqueado: ${b.event} programada en L${b.linea} (${b.dia}, turno ${b.turno}) ${b.reason}`;
 }
 
 // ============================================================

@@ -1,9 +1,13 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { prisma } from '@/server/db';
 import { parseDiarioHl } from '@/server/parser';
-import { analizarPlan } from '@/server/analysis';
+import { analizarPlanConLineWise } from '@/server/analysis';
 
 export const runtime = 'nodejs';
+// LineWise model on the HF Space can take up to ~90 s on a cold start; give
+// the route enough budget to wait without timing out. Vercel limits this to
+// 300 s on Pro plans; local dev (`next dev`) has no enforced cap.
+export const maxDuration = 300;
 
 export async function POST(req: NextRequest) {
   const form = await req.formData();
@@ -14,7 +18,10 @@ export async function POST(req: NextRequest) {
   const buf = Buffer.from(await file.arrayBuffer());
   const parsed = parseDiarioHl(buf);
   if (!parsed.length) {
-    return NextResponse.json({ error: 'empty_parse', detail: 'No se detectaron filas válidas en el Excel.' }, { status: 400 });
+    return NextResponse.json(
+      { error: 'empty_parse', detail: 'No se detectaron filas válidas en el Excel.' },
+      { status: 400 },
+    );
   }
 
   const plan = await prisma.plan.create({
@@ -32,6 +39,15 @@ export async function POST(req: NextRequest) {
     },
   });
 
-  const analisis = await analizarPlan(plan.id, plan.nombre, parsed);
+  // Primary path: LineWise model on HF Space. Falls back to heuristics
+  // transparently when HF_TOKEN is missing or the Space is offline. The
+  // response always carries `meta.source` so the UI can surface either.
+  const analisis = await analizarPlanConLineWise(
+    plan.id,
+    plan.nombre,
+    parsed,
+    buf,
+    file.name,
+  );
   return NextResponse.json(analisis);
 }

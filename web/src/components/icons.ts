@@ -38,6 +38,7 @@ export {
   TrendingDown,
   TrendingUp,
   Triangle,
+  Upload,
   X,
   Zap,
 } from 'lucide-react';

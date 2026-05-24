@@ -32,11 +32,19 @@ export interface DistribucionSku {
   alcanzable: number;
 }
 
+export interface ShapDriver {
+  name: string;        // feature name (e.g. 'prev_oee', 'changeover_variance_min')
+  shap: number;        // signed contribution: positive = pushed OEE up, negative = down
+}
+
+export type Turno = 'M' | 'T' | 'N';
+
 export interface FilaPlan {
   of: string;
   linea: Linea;
   secuencia: number;
   dia: string;
+  turno?: Turno;            // optional: present when source plan carries shifts
   sku: string;
   nombre: string;
   hlPlan: number;
@@ -45,6 +53,29 @@ export interface FilaPlan {
   oeePrevisto: number;
   veredicto: Veredicto;
   motivo: string;
+  // ---- LineWise model fields (present when meta.source === 'linewise') ----
+  oeeP10?: number;          // pessimistic floor
+  oeeP90?: number;          // achievable ceiling
+  disp?: number;            // Disponibilidad (Damm formula)
+  rend?: number;            // Rendimiento
+  cal?: number;             // Calidad
+  topDrivers?: ShapDriver[];// top SHAP features for this OF's p50 prediction
+  feasReason?: string;      // explicit infeasibility reason from the parser
+  cambioTeoricoMin?: number;// theoretical changeover minutes from CF Prat matrix
+}
+
+export interface BloqueoMant {
+  linea: Linea;
+  dia: string;              // ISO yyyy-mm-dd
+  turno: Turno;
+  event: 'LIMPIEZA' | 'MANTENIMIENTO' | 'OUTAGE';
+  reason: string;           // human-readable Spanish for the UI
+}
+
+export interface DecomposicionOEE {
+  disp: number;
+  rend: number;
+  cal: number;
 }
 
 export interface AnalisisPlan {
@@ -54,6 +85,17 @@ export interface AnalisisPlan {
   perdidaEvitablePts: number;
   banderas: { evitar: number; revisar: number; procede: number };
   filas: FilaPlan[];
+  // ---- LineWise model headline fields (present when meta.source === 'linewise') ----
+  oeeP10Plan?: number;
+  oeeP90Plan?: number;
+  decomposicion?: DecomposicionOEE;
+  bloqueosMant?: BloqueoMant[];
+  totalHl?: number;
+  meta?: {
+    source: 'linewise' | 'heuristic_fallback';
+    spaceLatencyMs?: number;
+    warning?: string;       // shown as small amber badge in the UI when fallback fires
+  };
 }
 
 export interface Recomendacion {
