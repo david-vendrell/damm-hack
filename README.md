@@ -1,318 +1,127 @@
 # LineWise · Damm × Engineering HUB Hackathon
 
-> Intelligent line sequencing and OEE optimization for canning lines **14**, **17**, **19** at El Prat.
+> Predict the real OEE of a planned production week, and rearrange it to lift the ceiling.
 
-Blue Yonder tells you what the plan *should* be. **LineWise** tells you what reality says will actually happen — and rearranges your week when an urgent order lands.
+LineWise is an internal planning aid for the canning lines **L14**, **L17** and **L19** at Damm's El Prat factory. Blue Yonder tells the planner what the schedule should look like. LineWise tells the planner what reality will actually deliver, and how to rearrange the week to do better.
 
-## Repo layout
+---
 
-```
-damm-hack/
-├── Repte operacions/            ← raw Damm Excels (single source of truth; includes Diario Hl + v2 Planificado)
-├── docs/
-│   └── IO_SCHEMA.md             ← Input / Output contract for engine, UI, Claude tools
-├── scripts/                     ← repeatable Python pipeline
-│   ├── 01_ingest.py             ← Excels → DuckDB raw_* tables (lossless)
-│   ├── 02_parse_cf_matrix.py    ← Tabla CF Prat → dim_theoretical_changeover_matrix
-│   ├── 03_derived_tables.py     ← raw_* → fact_runs (with horas_cambio) / fact_changeovers / fact_lost_time / fact_limpieza / fact_plan_vs_actual_2026 / fact_diario_hl_planif / dim_sku / dim_line + _meta_formulas + _meta_relationships
-│   ├── 04_analytics.py          ← 20 analytical queries → CSVs + Parquet exports
-│   ├── 05_report.py             ← Generate Data Analysis Report (HTML + PDF)
-│   ├── 06_build_training_dataset.py  ← Assemble Groups A-F → parquet/train.parquet + test.parquet
-│   ├── 07_train_oee_quantile.py      ← Train 3 LightGBM quantile models → models/lgb_oee_p{10,50,90}.pkl
-│   ├── 08_evaluate_oee_quantile.py   ← Pinball, coverage, MAE, SHAP, baselines → reports/model_eval/
-│   ├── 09_build_space_lookups.py     ← Precompute reference parquets → lookups/
-│   ├── 10_push_to_hf_space.py        ← Push the Space to HF (private, personal account)
-│   └── 11_backtest_for_pitch.py      ← Q4 2025 holdout backtest → reports/backtest/
-├── engine/                      ← Inference engine (runs in the HF Space)
-│   ├── parse_planning_excel.py  ← Auto-detect Planificado vs Diario Hl, parse, feasibility check
-│   ├── build_features.py        ← Enrich a plan block with Groups B-F from lookups
-│   └── predict_oee.py           ← Load models + predict {p10, p50, p90, top_features}
-├── app.py                       ← Gradio UI (HF Space entry point)
-├── db/linewise.duckdb           ← Portable database (~6 MB)
-├── parquet/                     ← fact/dim tables + train.parquet + test.parquet
-├── models/                      ← Trained LightGBM quantile models + feature schema
-├── lookups/                     ← Precomputed reference parquets for the Space
-├── reports/
-│   ├── analytics/               ← Per-query CSV results
-│   ├── model_eval/              ← Pinball, MAE, coverage, SHAP, model_card.md
-│   ├── backtest/                ← Q4 2025 backtest summary
-│   └── LineWise_Data_Report.pdf ← Polished data report
-├── web/                         ← Next.js front-end (dashboard, prototype)
-└── LineWise Operaciones ES.pdf  ← original challenge brief
-```
+## The problem
+
+- Damm plans production with Blue Yonder / JDA, which uses **theoretical** changeover times.
+- Reality diverges: format changes, maintenance windows, micro-stops, SKU mix, warm-up after CIP.
+- Over 2,141 production OFs in 2025, mean OEE was ~**49 %** with a historical p90 ceiling of ~**68 %**.
+- That is a ~**14 point controllable gap** that nobody is harvesting systematically. Each OEE point on these lines is millions of cans per year.
+
+## Our solution
+
+LineWise is built around four moves:
+
+1. **Predict.** A LightGBM quantile model (p10 / p50 / p90) scores every planned block using ~70 features (SKU identity, previous OF, packaging hierarchy, recent line history, maintenance proximity, calendar). MAE on p50 is 0.103 on a Q4 2025 holdout.
+2. **Validate.** Planners upload a `Planificado producciones` or `Diario Hl_Planif` Excel and get a per-OF verdict (Procede / Revisar / Evitar) with the top SHAP drivers behind it.
+3. **Optimize.** A constraint-aware solver reassigns blocks across (línea, día, turno) respecting deadlines, line-format compatibility, HL invariance, and a quality gate (≥ 3 historical runs per SKU × línea). Two objectives: expected p50 or aggressive p90.
+4. **Explain.** Every recommendation ships with a reason: drivers per block, swap log per move. No LLM in the prediction or optimization paths.
+
+The planner-facing surface is a Next.js dashboard with four routes: **Observabilidad** (historic 2025 performance), **Validar plan** (upload + verdicts), **Post mortem** (root-cause), **Urgencias** (reactive replan). Stack: Next.js 14 (App Router) + Tailwind + Prisma/SQLite for editable objects + DuckDB for the analytics layer + LightGBM for the model.
+
+---
 
 ## Quick start
 
-### Python pipeline (data → model → HF Space demo)
+One command, on a fresh clone:
 
 ```bash
 git clone https://github.com/david-vendrell/damm-hack.git
 cd damm-hack
-pip install -r requirements.txt
-# Build the database + canonical tables + analytics report
-python3 scripts/01_ingest.py
-python3 scripts/02_parse_cf_matrix.py
-python3 scripts/03_derived_tables.py
-python3 scripts/04_analytics.py
-python3 scripts/05_report.py
-# Train the OEE quantile model
-python3 scripts/06_build_training_dataset.py
-python3 scripts/07_train_oee_quantile.py
-python3 scripts/08_evaluate_oee_quantile.py
-python3 scripts/09_build_space_lookups.py
-python3 scripts/11_backtest_for_pitch.py
-# Test the Gradio app locally
-python3 app.py
-# Push the demo to a private HF Space (requires HF_TOKEN env var)
-HF_TOKEN=hf_xxx python3 scripts/10_push_to_hf_space.py
+./start.sh
 ```
 
-The brew dep `libomp` is required on macOS for LightGBM (`brew install libomp`). All scripts are idempotent — re-run any of them after changes to upstream files.
+`start.sh` is idempotent. It will:
 
-### Next.js front-end
+1. Verify Node 18+ and npm.
+2. Confirm the five required Excels are present in `Repte operacions/`.
+3. Install `web/` dependencies if `node_modules` is missing.
+4. Apply Prisma migrations to `web/prisma/dev.db`.
+5. Build `db/linewise.duckdb` from the Excels (only if missing).
+6. Launch Prisma Studio on `http://localhost:5555` and the Next dev server on `http://localhost:3000`.
+
+Then open the dashboard at **http://localhost:3000/observabilidad**.
+
+Useful flags:
 
 ```bash
-cd web
-npm i
-npx prisma migrate dev
-npm run ingest          # reads Repte operacions/*.xlsx → SQLite (OfHecho)
-npm run dev             # http://localhost:3000 → /observabilidad
+./start.sh --setup-only      # prepare everything, do not launch any server
+./start.sh --no-studio       # skip Prisma Studio, just the dev server
+./start.sh --rebuild-duck    # force-rebuild db/linewise.duckdb from the Excels
+./start.sh --help            # full usage
 ```
 
-See `web/README.md` for details on the ingest pipeline, cleaning decisions, and how to add more years.
+### One-time prerequisites
+
+- **Node 18+** and **npm**.
+- **Python 3** with `duckdb`, `pandas`, `openpyxl` (only needed the first time, to build `db/linewise.duckdb`). Quick setup:
+  ```bash
+  python3 -m venv .venv && source .venv/bin/activate
+  pip install duckdb pandas openpyxl
+  ```
+- macOS only, and only if you intend to retrain the model: `brew install libomp` (LightGBM dependency). Not needed to run the dashboard.
 
 ---
 
-## What's in the DuckDB database
+## What lives where
 
-### Raw layer (lossless — every Excel column preserved)
-
-| Table | Source file | Rows | Cols |
-|---|---|---:|---:|
-| `raw_oee` | OEE 14_17_19_ 2025.xlsx | 2,274 | 45 |
-| `raw_cambios` | Cambios 14_17_19_ 2025.xlsx | 2,181 | 31 |
-| `raw_tiempo` | Tiempo 14_17_19_ 2025.xlsx | 2,278 | 35 |
-| `raw_mantenimiento` | Mantenimiento 14_17_19_ 2025.xlsx | 2,276 | 25 |
-| `raw_volumen` | Volumen 14_17_19_ 2025.xlsx | 2,278 | 20 |
-| `raw_plan_2026` | Planificado producciones 14-17-19.xlsx | 78 | 19 |
-| `raw_plan_2026_v2` | Planificado producciones (v2) | 78 | 18 |
-| `raw_actual_2026` | Produccion_L14,17,19_18-22.xlsx | 36 | 20 |
-| `raw_data_extra` | data - 2026-05-18T181640.542.xlsx | 2,276 | 45 |
-| `raw_diario_hl_planif` | Diario Hl_Planif.xlsx (wide cells) | 44 | 100 |
-| `raw_diario_hl_planif_headers` | sidecar — original multi-line headers | 98 | 3 |
-| `raw_cf_lata_barril` | Tabla CF Prat (sheet) | 46 | 8 |
-| `raw_cf_tiempos_adicionales` | Tabla CF Prat (sheet) | 37 | 12 |
-
-### Canonical layer (use these for analysis)
-
-| Table | Rows | What it is |
-|---|---:|---|
-| `dim_line` | 3 | Production lines L14/L17/L19 + format states they support |
-| `dim_sku` | 170 | SKU master: brand, family, beer, can type, packaging, **inferred `estado_volumen`** (1/3, 1/2, 2/5) |
-| `dim_theoretical_changeover_matrix` | 86 | Long-format theoretical changeover minutes per (linea, from_state, to_state) parsed from Tabla CF Prat |
-| `fact_runs` | 2,184 | **Canonical per-OF run.** Joined OEE + Tiempo + Volumen + Mantenimiento + Cambios. **52 columns** including `horas_cambio` (the Damm-formula real changeover time). Excludes LIMPIEZA WOs. |
-| `fact_lost_time` | 19,602 | Long-format breakdown of every OF's time in 9 categories: `marcha, cip, baja_velocidad, saturacion_salida, falta_producto, esterilizacion, paro_maquina, idle, pnp` (in minutes) |
-| `fact_changeovers` | 2,180 | Per consecutive (prev_of, of) on the same line, with prev SKU/state, change type label, and theoretical reference duration |
-| `fact_limpieza` | 133 | Standalone LIMPIEZA / cleaning WOs (separated from production runs) |
-| `fact_plan_vs_actual_2026` | 91 | May 2026 Blue Yonder plan joined to actual production for plan-vs-actual comparison |
-| `fact_diario_hl_planif` | 197 | **Daily HL planning** May 18-24 2026 in long format `(linea, sku, fecha, metric, value)` — Programa Prod / Acordado + 9 churn metrics |
-| `_meta_formulas` | 6 | The OEE & changeover formulas from Damm's data-model diagram |
-| `_meta_relationships` | 20 | The edges from Damm's data-model diagram |
-
-### Metadata helpers
-
-```sql
-SELECT * FROM _meta_files;          -- which source file populated which raw_ table
-SELECT * FROM _meta_tables;         -- description of every derived table
-SELECT * FROM _meta_formulas;       -- Damm OEE & changeover formulas (from the diagram)
-SELECT * FROM _meta_relationships;  -- Damm entity-relationship edges (from the diagram)
 ```
-
-### Damm's data model & the corrected changeover formula
-
-From the diagram Damm provided, **MES / OF is the central nexus**. Every fact table joins to a single OF identifier. The diagram also gives us the **real changeover formula**:
-
-> `horas_cambio = PAR_TOT − (PNP + LIMPIEZA + IDLE)`
-
-This is now exposed as `fact_runs.horas_cambio` (previously we approximated with `horas_cip` — wrong). Note: `IDLE` does **NOT** affect OEE — keep it informational. See `docs/IO_SCHEMA.md` for the full data-model diagram and Input/Output contract.
-
----
-
-## How to query the database
-
-### Python (preferred)
-
-```python
-import duckdb
-con = duckdb.connect("db/linewise.duckdb", read_only=True)
-df = con.execute("""
-    SELECT linea, AVG(oee) FROM fact_runs WHERE oee IS NOT NULL GROUP BY linea ORDER BY linea
-""").fetchdf()
-print(df)
-```
-
-### Command line (DuckDB CLI)
-
-```bash
-brew install duckdb            # one-time
-duckdb db/linewise.duckdb
-duckdb> SELECT * FROM _meta_tables;
-duckdb> .quit
-```
-
-### GUI (DBeaver / TablePlus / DataGrip)
-
-- Driver: **DuckDB** (DBeaver has it built-in since v23)
-- URL: `jdbc:duckdb:/abs/path/to/db/linewise.duckdb`
-- Read-only is fine.
-
-### Power BI / Excel (via Parquet)
-
-`parquet/` contains every fact/dim table as `.parquet`. Power BI and Excel power-query can read Parquet natively — no DuckDB needed.
-
----
-
-## Sharing the work with the team
-
-The whole database is a **single file** (~5 MB):
-
-```bash
-db/linewise.duckdb
-```
-
-Options:
-1. **Commit it.** It's small. Whoever pulls the repo gets it. (Already gitignored by default — see below if you want to commit.)
-2. **Slack/Drop attach.** Send `db/linewise.duckdb` to anyone, they open with the DuckDB CLI or Python.
-3. **Re-build.** Anyone with the raw Excels in `Repte operacions/` can run the 5 scripts and reproduce it exactly.
-
-To commit the DB (optional):
-```bash
-# in .gitignore, remove the db/ line if present, then:
-git add db/linewise.duckdb && git commit -m "snapshot duckdb"
+damm-hack/
+├── start.sh                     one-shot setup + launch (entry point)
+├── web/                         Next.js dashboard (Observabilidad, Validar, Post mortem, Urgencias)
+├── db/linewise.duckdb           analytics DB consumed by the dashboard (~6 MB)
+├── Repte operacions/            raw Damm Excels (source of truth)
+├── scripts/                     Python pipeline: Excel → DuckDB → model → lookups
+├── engine/                      inference modules (parser, features, predict, optimizer)
+├── app.py                       Gradio model demo (separate from the web app)
+├── models/, lookups/, parquet/  trained models, runtime lookups, table exports
+├── reports/                     analytics CSVs, model eval, backtest, PDF report
+├── HANDOFF.md                   deep technical handoff (read this for the full story)
+└── PRODUCT.md                   product intent, users, voice
 ```
 
 ---
 
-## Headline findings (from `python3 scripts/04_analytics.py`)
+## Assumptions
 
-### OEE per line (baseline)
+- The Excels in `Repte operacions/` are the canonical inputs. Sheet names and headers match the originals delivered by Damm (May 2026 snapshot). If Damm reshapes a file, the ingestion scripts need a small update.
+- Line × format compatibility is a hard constraint, codified from Damm's verbal confirmation on 2026-05-23: **L14 = {1/3, 1/2}**, **L17 = {1/3}**, **L19 = {1/3, 1/2, 2/5}**.
+- `Fecha Fin` is the only date granularity available in OEE history (no hour of day). Intra-shift effects only land when uploads include a `turno` column.
+- The OEE formula and `horas_cambio = PAR_TOT − (PNP + LIMPIEZA + IDLE)` follow Damm's own data-model diagram (also stored in `_meta_formulas`). `IDLE` does **not** affect OEE.
+- Cross-line moves are limited to (SKU × línea) pairs with ≥ 3 historical runs. Physical feasibility is inferred from history, not asserted by Damm.
+- The model was trained on 2025 only. Cold-start SKUs new in May 2026 fall back to family-level priors (`familia_line_oee_p50`).
 
-| Line | n OFs | mean OEE | median OEE | p10 | p90 |
-|---|---:|---:|---:|---:|---:|
-| **L14** | 436 | **42.6 %** | 44.7 % | 25 % | 60 % |
-| **L17** | 950 | **53.1 %** | 54.1 % | 33 % | 71 % |
-| **L19** | 792 | **48.1 %** | 47.8 % | 24 % | 71 % |
+## Limitations
 
-**Brutally low.** That's the pitch: each +1 OEE point = millions of cans recovered.
+- Confidence band coverage of `[p10, p90]` is **67 %** on the holdout, vs an 80 % target. The band is narrower than ideal.
+- MAE improvement over a naive-mean baseline is **+20 %** on p50, vs a ≥ 30 % stretch target.
+- The optimizer's typical lift on already-decent plans is modest (**~+0.4 OEE pts**). Most historical plans are already close to the ceiling. The diagnostic value (validate-this-plan / find-improvements / diagnose-not-schedulable) matters more than the delta.
+- Block splitting is not supported. Each OF is atomic and assigned to a single slot.
+- The worst prediction errors come from mid-shift incidents (breakdowns, quality events) that no sequencing-aware model can foresee from planning data alone.
+- The Hugging Face demo Space is private (the hackathon org is shared with competitors). Flip to public only during a live demo.
 
-### Biggest OEE killers (which dimensions of change hurt most)
+## Next steps
 
-| Change dimension | OEE with change | OEE without | **Δ** |
-|---|---:|---:|---:|
-| **Volum (size 1/3 ↔ 1/2)** | 0.39 | 0.50 | **−10.7 pts** |
-| Producto | 0.47 | 0.53 | −5.8 pts |
-| Brand | 0.47 | 0.53 | −5.7 pts |
-| CAP (tapón) | 0.44 | 0.49 | −5.5 pts |
-| Primario | 0.47 | 0.51 | −3.9 pts |
-| Secundario | 0.47 | 0.50 | −3.4 pts |
-| Palet | 0.48 | 0.50 | −2.6 pts |
-
-→ **Size changes are the headline OEE killer.** Sequencing should ruthlessly cluster same-size runs.
-
-### Most-frequent SKU pair transitions (top 5)
-
-| Line | from → to | n | OEE after |
-|---|---|---:|---:|
-| 19 | LC12LTW → VI12LTW | 14 | 44 % |
-| 19 | ED13LP12 → ED13P12M | 12 | 64 % |
-| 17 | FD13LTNN → FDT13LT | 11 | 61 % |
-| 17 | ED13LTCW → ED13LTW | 10 | 61 % |
-| 17 | VO13LP24 → VO13LTNN | 10 | 62 % |
-
-### Worst-performing SKUs (≥10 runs)
-
-| SKU | brand | mean OEE |
-|---|---|---:|
-| DL13LP4A | DAMM LEMON | **23 %** |
-| FD13LP4A | FREE DAMM | 29 % |
-| CM13LT | COMPLOT | 30 % |
-| SK13L12 | SKOL | 31 % |
-| SK1312MN | SKOL | 35 % |
-
-→ **Damm Lemon and Free Damm small-pack variants are chronic underperformers.**
-
-Full numbers in `reports/analytics/*.csv` and the polished PDF at `reports/LineWise_Data_Report.pdf`.
+1. Block splitting in the optimizer (V3) so large OFs can span multiple (línea, día, turno) slots.
+2. Optuna hyperparameter search plus recalibrated quantile alphas (0.05 / 0.95) to widen the `[p10, p90]` band to its 80 % target.
+3. OR-tools CP-SAT formulation for global optimization (the current solver is greedy with tabu).
+4. Multi-week optimization. Today the horizon is a single week.
+5. Downloadable optimized Excel in Damm's original `Planificado producciones` format, so the planner can push it straight back into Blue Yonder.
+6. Real-time integration with Damm MES: pull plans directly, push recommendations back. Ingest 2024 and 2023 history if Damm shares it, to lift the training set.
 
 ---
 
-## Known data quality flags (don't pretend these don't exist)
+## Where to go next
 
-| # | Issue | Mitigation |
-|---|---|---|
-| 1 | **`OEE > 1` on ~12 rows** (data noise — some best runs report 1.57, etc.) | Clip OEE to `[0, 1]` in modelling. Flag at `> 1.0`. |
-| 2 | **`H. Tot. > 100h` outliers** (max = 21,065h) | `fact_runs.outlier` boolean filters these out. |
-| 3 | **LIMPIEZA OFs** have NaN OEE | Split into `fact_limpieza`; excluded from `fact_runs`. |
-| 4 | **`Cambios` file has 41 OFs missing** vs OEE file | LEFT JOIN handles it; the dimensional flags become NULL. |
-| 5 | **Date granularity is `Fecha Fin` only** (no time-of-day) | Sort by `(fecha_fin, of)` to get a stable order. |
-| 6 | **Plan vs Actual May 2026** has duplicate plan rows (shift T/N/M) | `fact_plan_vs_actual_2026.estado_join` ∈ {matched, only_plan, only_actual}. |
-| 7 | **`C.*` columns occasionally hold large ints** (e.g. 163, 803) | Use the `*_flag` boolean columns we engineered. |
+- [`HANDOFF.md`](HANDOFF.md) — full technical handoff: architecture, schemas, model card, optimizer internals, metrics.
+- [`PRODUCT.md`](PRODUCT.md) — product intent, users, tone, anti-references.
+- [`web/README.md`](web/README.md) — frontend details, ingest pipeline, API contract.
+- [`docs/IO_SCHEMA.md`](docs/IO_SCHEMA.md) — engine / UI / tool input-output contract.
+- [`reports/LineWise_Data_Report.pdf`](reports/LineWise_Data_Report.pdf) — polished data analysis report.
 
----
-
-## Next steps (the build, in priority order)
-
-1. **OEE estimator** (Person A) — lookup + LightGBM blend over `fact_runs`. Feature list in spec.
-2. **Sequence optimizer** (Person A) — OR-tools CP-SAT over candidate insertions of an urgent demand block.
-3. **Claude tools schema** (Person C) — exposes `query_history`, `score_sequence`, `find_analogs`, `optimize_sequence`, `list_diagnostics`. Use the `fact_*` and `dim_*` tables — they're already shaped for it.
-4. **Frontend** (Person B) — Three.js 3D + drag-and-drop schedule strip + Claude chat panel.
-5. **Time Machine backtest** (Person C) — holdout last 13 weeks of 2025; quantify "what if Damm had followed LineWise" in OEE points & cans.
-
----
-
-## Dependencies
-
-```
-duckdb >= 0.10
-pandas >= 2.0
-openpyxl >= 3.1
-# for the HTML→PDF report:
-google-chrome   (system; or use the bundled Chromium fallback in scripts/05_report.py)
-```
-
-`pip install -r requirements.txt` covers the Python ones.
-
----
-
-## OEE quantile model & demo
-
-A LightGBM quantile regressor (× 3 — α = 0.10 / 0.50 / 0.90) trained on 1,670 historical OFs (Jan–Sep 2025), validated on 471 OFs (Oct–Dec 2025).
-
-**Holdout metrics:**
-
-| Metric | Value | Target |
-|---|---:|---|
-| MAE on p50 | 0.103 | < 0.12 ✓ |
-| vs naive-mean baseline | +20.0% MAE improvement | ≥ 30% (close) |
-| vs theoretical-time-only baseline | +16.4% improvement | strictly better ✓ |
-| Coverage of [p10, p90] band | 66.7% | ≈ 80% (model bands narrow) |
-
-**Backtest headline (Q4 2025):**
-
-| Metric | Value |
-|---|---:|
-| Actual OEE (HL-weighted) | 57.1% |
-| Model p90 ceiling (HL-weighted) | 63.5% |
-| Controllable gap | **+8.3 pts** |
-| At 30% optimizer capture → | **+2.5 OEE pts · ~27,300 extra HL** |
-
-**Top SHAP drivers:** `sku`, `prev_oee`, `sku_line_oee_p90_last_30d`, `familia`, `week_iso`, `linea_oee_p50_last_7d`, `familia_line_oee_p50`, `n_llamadas_mant`, `c_producto_flag`, `hours_since_same_sku`.
-
-**Demo:** Private Gradio Space at `https://huggingface.co/spaces/marcaguilar/linewise-demo`. Upload a Planificado or Diario Hl_Planif Excel → per-block p10/p50/p90 + SHAP drivers + line/week aggregates.
-
-See `reports/model_eval/model_card.md` and `reports/backtest/backtest_summary.json` for full details.
-
-## Contact / ownership
-
-- **Repo:** github.com/david-vendrell/damm-hack
-- **Challenge:** LineWise (Operations) — DAMM x Engineering HUB Hackathon
-- **Lines:** 14, 17, 19 at El Prat factory
+**Lines:** 14, 17, 19 at El Prat. **Challenge:** LineWise (Operations), DAMM × Engineering HUB Hackathon, May 2026.
