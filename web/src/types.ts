@@ -93,6 +93,7 @@ export interface AnalisisPlan {
   totalHl?: number;
   meta?: {
     source: 'linewise' | 'heuristic_fallback';
+    via?: 'local' | 'hf_space';      // which backend served the LineWise call
     spaceLatencyMs?: number;
     warning?: string;       // shown as small amber badge in the UI when fallback fires
   };

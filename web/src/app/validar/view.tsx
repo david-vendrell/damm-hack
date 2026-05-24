@@ -269,8 +269,10 @@ function PlanHero({
           <span><span className="num font-medium text-ink-2">{pct(decomp.cal, 1)}</span> Calidad</span>
           <span className="ml-auto inline-flex items-center gap-1.5 text-ink-4">
             <Sparkles className="h-3 w-3" strokeWidth={2} />
-            {analisis.meta?.source === 'linewise' ? 'Modelo LineWise' : 'Heurística local'}
-            {analisis.meta?.spaceLatencyMs && (
+            {analisis.meta?.source === 'linewise'
+              ? `Modelo LineWise · ${analisis.meta.via === 'local' ? 'local' : 'HF Space'}`
+              : 'Heurística local'}
+            {analisis.meta?.spaceLatencyMs !== undefined && (
               <span className="num">· {Math.round(analisis.meta.spaceLatencyMs / 1000)} s</span>
             )}
             <button

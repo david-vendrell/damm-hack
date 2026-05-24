@@ -1,17 +1,22 @@
-// Thin server-side wrapper around the LineWise HF Space (gradio).
-// Contract: docs/FRONTEND_API_CONTRACT.md v1.3.0
+// Server-side LineWise model proxy.
 //
-// Returns the raw 4-tuple from /optimize_v3 plus a normalised view of
-// the per-block predictions (extracted from the swap log + day table +
-// summary_md markdown). The caller (analizarPlanConLineWise) maps that
-// into our AnalisisPlan / FilaPlan shape.
+// Strategy (v2): call the local Python sidecar first (fast, no network,
+// no auth), fall back to the HF Space when the sidecar is down. This
+// matches what the planner actually wants at the demo: a single click,
+// answer in 3-8s, no token management, works offline.
 //
-// Never throws on Space failure: the caller falls back to heuristics.
+// Local sidecar URL is configurable via LINEWISE_URL env var (default
+// http://localhost:8001). See scripts/local_model_server.py.
+//
+// HF Space fallback uses @gradio/client with HF_TOKEN. Returns null
+// when both paths fail — caller falls back to heuristic.
 
 import { Client } from '@gradio/client';
 
+const LOCAL_URL = process.env.LINEWISE_URL ?? 'http://localhost:8001';
 const SPACE_ID = 'marcaguilar/linewise-demo';
-const ENV_TOKEN = process.env.HF_TOKEN;
+const HF_TOKEN = process.env.HF_TOKEN;
+const LOCAL_TIMEOUT_MS = 120_000;     // local model: max 2 min per request
 
 export interface LineWiseRawResult {
   summary_md: string;
@@ -19,6 +24,7 @@ export interface LineWiseRawResult {
   line_tbl: GradioDataframe;
   swap_tbl: GradioDataframe;
   latencyMs: number;
+  via: 'local' | 'hf_space';
 }
 
 export interface GradioDataframe {
@@ -27,35 +33,111 @@ export interface GradioDataframe {
   metadata?: { dtype?: string[] };
 }
 
+interface CallOpts {
+  aggressive?: boolean;
+  outages?: unknown[];
+  priority_ofs?: unknown[];
+  replan_from_ts?: string;
+}
+
 /**
- * Call /optimize_v3 on the LineWise HF Space.
- * Returns null when HF_TOKEN is missing OR the Space is unreachable —
- * the caller must fall back to the heuristic path.
+ * Call /optimize_v3 on whichever backend is reachable. Tries the local
+ * sidecar first (fast path), falls back to HF Space. Returns null when
+ * both fail — the caller must fall back to the heuristic path.
  */
 export async function callLineWise(
   fileBuffer: Buffer,
   fileName: string,
-  opts: {
-    aggressive?: boolean;
-    outages?: unknown[];
-    priority_ofs?: unknown[];
-    replan_from_ts?: string;
-  } = {},
+  opts: CallOpts = {},
 ): Promise<LineWiseRawResult | null> {
-  if (!ENV_TOKEN) {
-    console.warn('[linewise] HF_TOKEN not set; skipping Space call');
-    return null;
+  // ---- Local sidecar (fast path) ----
+  const local = await callLocal(fileBuffer, fileName, opts).catch(() => null);
+  if (local) return local;
+
+  // ---- HF Space fallback ----
+  if (HF_TOKEN) {
+    const hf = await callHfSpace(fileBuffer, fileName, opts).catch(() => null);
+    if (hf) return hf;
   }
+  return null;
+}
+
+
+/* ─────────────────────────── Local sidecar ─────────────────────────── */
+
+async function callLocal(
+  fileBuffer: Buffer,
+  fileName: string,
+  opts: CallOpts,
+): Promise<LineWiseRawResult | null> {
   const t0 = Date.now();
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), LOCAL_TIMEOUT_MS);
   try {
-    const client = await Client.connect(SPACE_ID, {
-      token: ENV_TOKEN as `hf_${string}`,
-    });
-    // @gradio/client accepts a Blob for file inputs in Node 18+ (global Blob)
+    const form = new FormData();
     const blob = new Blob([new Uint8Array(fileBuffer)], {
       type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
     });
-    // Add the original filename via the wrapper (Gradio uses .name internally)
+    form.append('file', blob, fileName);
+    form.append('aggressive', String(opts.aggressive ?? false));
+    form.append('outages_json', opts.outages ? JSON.stringify(opts.outages) : '');
+    form.append('priority_ofs_json', opts.priority_ofs ? JSON.stringify(opts.priority_ofs) : '');
+    form.append('replan_from_ts', opts.replan_from_ts ?? '');
+
+    const resp = await fetch(`${LOCAL_URL}/optimize_v3`, {
+      method: 'POST',
+      body: form,
+      signal: controller.signal,
+    });
+    if (!resp.ok) {
+      console.warn(`[linewise] local sidecar returned ${resp.status}`);
+      return null;
+    }
+    const body = (await resp.json()) as { data: unknown[] };
+    if (!Array.isArray(body.data) || body.data.length < 4) {
+      console.warn('[linewise] local sidecar: unexpected response shape');
+      return null;
+    }
+    const summary_md = String(body.data[0] ?? '');
+    // The Gradio callback wraps engine errors in an "❌ Error" markdown reply
+    // instead of throwing. Detect that and treat it as a failure so we fall
+    // through to HF / heuristic instead of returning a useless empty result.
+    if (summary_md.startsWith('❌')) {
+      console.warn('[linewise] local sidecar returned engine error:', summary_md.slice(0, 200));
+      return null;
+    }
+    return {
+      summary_md,
+      day_tbl:   body.data[1] as GradioDataframe,
+      line_tbl:  body.data[2] as GradioDataframe,
+      swap_tbl:  body.data[3] as GradioDataframe,
+      latencyMs: Date.now() - t0,
+      via: 'local',
+    };
+  } catch (err) {
+    // Connection refused (sidecar not started) → fall through to HF
+    return null;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+
+/* ─────────────────────────── HF Space fallback ─────────────────────────── */
+
+async function callHfSpace(
+  fileBuffer: Buffer,
+  fileName: string,
+  opts: CallOpts,
+): Promise<LineWiseRawResult | null> {
+  const t0 = Date.now();
+  try {
+    const client = await Client.connect(SPACE_ID, {
+      token: HF_TOKEN as `hf_${string}`,
+    });
+    const blob = new Blob([new Uint8Array(fileBuffer)], {
+      type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+    });
     const fileLike = Object.assign(blob, { name: fileName });
 
     const result = await client.predict('/optimize_v3', {
@@ -67,32 +149,30 @@ export async function callLineWise(
     });
 
     const data = result.data as unknown[];
-    if (!Array.isArray(data) || data.length < 4) {
-      console.warn('[linewise] unexpected response shape from /optimize_v3');
-      return null;
-    }
+    if (!Array.isArray(data) || data.length < 4) return null;
     return {
       summary_md: String(data[0] ?? ''),
       day_tbl:   data[1] as GradioDataframe,
       line_tbl:  data[2] as GradioDataframe,
       swap_tbl:  data[3] as GradioDataframe,
       latencyMs: Date.now() - t0,
+      via: 'hf_space',
     };
   } catch (err) {
-    console.warn('[linewise] Space call failed, falling back to heuristic:', err);
+    console.warn('[linewise] HF Space call failed:', err);
     return null;
   }
 }
 
-/* -----------------------------------------------------------------------
+
+/* ─────────────────────────────────────────────────────────────────────
  * Helpers to parse pieces of the response.
  * The contract documents the markdown format; we extract the structured
  * numbers from it with permissive regex so small format drift doesn't break.
- * ----------------------------------------------------------------------- */
+ * ───────────────────────────────────────────────────────────────────── */
 
 /** Extract factory-wide OEE pXX values from the headline table in summary_md. */
 export function parseHeadlineOee(md: string): { p50?: number; p90?: number } {
-  // Both "Plan actual" and "Plan optimizado" rows; we use Plan actual (= baseline prediction)
   const p50 = md.match(/Plan actual\s*\|\s*\*\*([\d.]+)\s*%\*\*/);
   const p90 = md.match(/Plan optimizado\s*\|\s*\*\*([\d.]+)\s*%\*\*/);
   return {
@@ -116,17 +196,12 @@ export function parseDecomposicion(md: string):
   };
 }
 
-/**
- * Parse the per-día factory table into a map keyed by ISO date.
- * Columns observed (v1.3.0): Día · Bloques (act→opt) · HL del día · OEE actual (pXX) ·
- *                            OEE optimizada · Δ pts · Mantenimiento
- */
 export interface DayTableRow {
   dia: string;            // ISO yyyy-mm-dd
   hlDia: number;
   oeeActual: number;      // fraction
   oeeOptimizada: number;
-  mantenimiento: string;  // raw string from the cell (may be empty or contain 🛠 ... LIMPIEZA ...)
+  mantenimiento: string;
 }
 
 export function parseDayTable(df: GradioDataframe): DayTableRow[] {
@@ -154,7 +229,6 @@ export function parseDayTable(df: GradioDataframe): DayTableRow[] {
   return out;
 }
 
-/** "Lun 2026-05-25" → "2026-05-25"  */
 function isoFromDayLabel(label: string): string | null {
   const m = label.match(/(\d{4}-\d{2}-\d{2})/);
   return m ? m[1] : null;
@@ -177,11 +251,6 @@ function pctFrom(v: unknown): number {
   return numberFrom(v);
 }
 
-/**
- * Parse mantenimiento badges from the per-day table into a flat list of
- * (linea, dia, event) tuples. The badge format is "🛠 L17 LIMPIEZA · L19 MANTENIMIENTO".
- * Turno is unknown from this view; we default to 'M' (CF Prat events start in mañana).
- */
 export function parseBloqueosMant(dayRows: DayTableRow[]): {
   linea: 14 | 17 | 19;
   dia: string;
@@ -192,15 +261,12 @@ export function parseBloqueosMant(dayRows: DayTableRow[]): {
   const out: ReturnType<typeof parseBloqueosMant> = [];
   for (const r of dayRows) {
     if (!r.mantenimiento) continue;
-    // e.g. "🛠 L17 LIMPIEZA · L19 LIMPIEZA"
     const segments = r.mantenimiento.split('·').map((s) => s.trim());
     for (const seg of segments) {
       const m = seg.match(/L(\d{2})\s+(LIMPIEZA|MANTENIMIENTO|OUTAGE)/i);
       if (!m) continue;
       const linea = Number(m[1]) as 14 | 17 | 19;
       const event = m[2].toUpperCase() as 'LIMPIEZA' | 'MANTENIMIENTO' | 'OUTAGE';
-      // LIMPIEZA spans M + T (per CF Prat 11.5h); MANTENIMIENTO + OUTAGE just M.
-      // We emit per-turno entries downstream by enumerating turnos in the caller.
       out.push({
         linea, dia: r.dia, turno: 'M', event,
         reason: `${event} programada en L${linea} (${r.dia})`,

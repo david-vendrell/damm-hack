@@ -468,7 +468,7 @@ export async function analizarPlanConLineWise(
     decomposicion: decomp,
     bloqueosMant: bloqueos,
     totalHl,
-    meta: { source: 'linewise', spaceLatencyMs: lw.latencyMs },
+    meta: { source: 'linewise', via: lw.via, spaceLatencyMs: lw.latencyMs },
   };
 }
 
