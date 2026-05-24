@@ -445,8 +445,13 @@ function ImpactView({
   applied: boolean;
   applyError: string | null;
 }) {
+  // "Plan con incidencia" = what the plan will achieve AFTER the optimizer's
+  // recommended moves are applied. `oeePrevistoPlan` is the raw baseline
+  // (current state, no optimizer); `planRecomendado.oeePlanRecomendado` is
+  // the projected outcome with every recommendation applied — that's what
+  // the user gets when they click Apply, so it's what we should compare.
   const oeeBefore = before.oeePrevistoPlan;
-  const oeeAfter  = after.oeePrevistoPlan;
+  const oeeAfter  = after.planRecomendado?.oeePlanRecomendado ?? after.oeePrevistoPlan;
   const deltaPts  = (oeeAfter - oeeBefore) * 100;
   const arrow = deltaPts < -0.05 ? '▼' : deltaPts > 0.05 ? '▲' : '=';
   const tone  = deltaPts < -0.05 ? 'text-damm' : deltaPts > 0.05 ? 'text-moss' : 'text-ink-3';
