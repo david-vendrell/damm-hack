@@ -41,6 +41,7 @@ def build_jobs_and_slots(
     extra_days_before_deadline: int = 0,
     outages: list[dict] | None = None,
     priority_ofs: list[dict] | None = None,
+    replan_from_ts: str | pd.Timestamp | None = None,
 ) -> tuple[list[Job], list[Slot], dict[str, Job], dict[str, Slot]]:
     """Translate a parsed-plan DataFrame into the (jobs, slots) data structures
     the V2/V3 solver consumes.
@@ -57,7 +58,16 @@ def build_jobs_and_slots(
                     is_priority=True, deadline parsed from the dict, and
                     feasible_lines derived from dim_sku format compat
                     (intersected with preferred_linea if supplied).
+    `replan_from_ts`: optional ISO timestamp ("2026-05-27T10:00:00"). When
+                    set, any OF whose scheduled `start_ts < replan_from_ts`
+                    is marked is_frozen=True — the optimizer pins it to its
+                    original slot (cannot move, cannot evict). Use for
+                    mid-week incident replans: Mon/Tue OFs are already in
+                    inventory and cannot be physically un-produced.
     """
+    replan_ts: pd.Timestamp | None = None
+    if replan_from_ts is not None and str(replan_from_ts).strip():
+        replan_ts = pd.Timestamp(replan_from_ts)
     feas = pd.read_parquet(Path(lookups_dir) / "sku_line_feasibility.parquet")
     feas_pairs = {(str(r.sku), int(r.linea)) for r in feas.itertuples()
                   if r.n_historical_runs >= 3}
@@ -105,6 +115,28 @@ def build_jobs_and_slots(
         feasible = _feasible_lines_for_sku(sku, ev)
         if not feasible:
             feasible = {int(row["linea"])}
+
+        # Mid-week replan: freeze any OF scheduled BEFORE the replan_from_ts.
+        # An OF whose scheduled start_ts <= replan_ts is either already
+        # produced or currently in progress — pin it (cannot move/evict).
+        is_frozen = False
+        frozen_reason = None
+        if replan_ts is not None:
+            try:
+                sched_start = pd.Timestamp(row.get("start_ts"))
+                if pd.notna(sched_start) and sched_start <= replan_ts:
+                    is_frozen = True
+                    # In-progress = started before replan, scheduled end (start + 8h) after
+                    shift_end = sched_start + pd.Timedelta(hours=8)
+                    if shift_end > replan_ts:
+                        frozen_reason = (f"En curso al momento del replán "
+                                         f"({replan_ts.isoformat()}) — no se interrumpe")
+                    else:
+                        frozen_reason = (f"Ya producido antes del replán "
+                                         f"({replan_ts.isoformat()})")
+            except Exception:
+                pass  # malformed start_ts → don't freeze (safer)
+
         jobs.append(Job(
             job_id=str(row["block_id"]),
             sku=sku,
@@ -115,6 +147,8 @@ def build_jobs_and_slots(
             original_block_id=str(row["block_id"]),
             raw_row=row.to_dict(),
             is_priority=bool(row.get("_is_priority", False)),
+            is_frozen=is_frozen,
+            frozen_reason=frozen_reason,
         ))
 
     # ----- synthetic priority jobs (additive; not present in the input plan) -----

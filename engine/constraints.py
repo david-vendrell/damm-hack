@@ -31,6 +31,9 @@ class Job:
     original_block_id: str
     raw_row: dict                 # full row from parse_planning_excel for round-trip
     is_priority: bool = False     # caller-injected urgent OF — pre-placed + pinned
+    is_frozen: bool = False       # already produced / in-progress at replan_from_ts
+                                  # → pinned to original slot, can't be moved or evicted
+    frozen_reason: str | None = None  # human-readable why (for the audit UI)
 
 
 @dataclass

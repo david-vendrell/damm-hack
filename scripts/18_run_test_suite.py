@@ -41,6 +41,7 @@ PLANS = [
     "08_outage_basico.xlsx",
     "09_priority_holgado.xlsx",
     "10_priority_evict.xlsx",
+    "11_replan_midweek.xlsx",
 ]
 
 # Per-plan incident config — only the 08+ plans declare anything.
@@ -67,6 +68,17 @@ INCIDENTS: dict[str, dict] = {
             {"sku": "ED13LTW", "hl": 800, "deadline": "2026-05-26",
              "preferred_linea": 17, "reason": "Pedido urgente que requiere desplazamiento"},
         ],
+    },
+    "11_replan_midweek.xlsx": {
+        "outages": [
+            {"linea": 17, "fecha": "2026-05-27", "turno": "T",
+             "reason": "Avería declarada Wed PM"},
+            {"linea": 17, "fecha": "2026-05-27", "turno": "N",
+             "reason": "Sigue rota tras intervención"},
+        ],
+        "priority_ofs": [],
+        # NEW — mid-week replan from Wed 10am: Mon + Tue + Wed M shift are pinned
+        "replan_from_ts": "2026-05-27T10:00:00",
     },
 }
 
@@ -123,17 +135,27 @@ def run_one(name: str) -> dict:
               f"(producto={decomp['disp_p50']*decomp['rend_p50']*decomp['cal_p50']*100:.2f}%)")
     print(f"  total HL planificados: {total_hl:,}")
 
-    # --- optimize p90 aggressive (with optional incidents)
+    # --- optimize p90 aggressive (with optional incidents + replan_from_ts)
     incidents = INCIDENTS.get(name, {})
-    outages      = incidents.get("outages") or None
-    priority_ofs = incidents.get("priority_ofs") or None
+    outages         = incidents.get("outages") or None
+    priority_ofs    = incidents.get("priority_ofs") or None
+    replan_from_ts  = incidents.get("replan_from_ts")
     if outages or priority_ofs:
         print(f"  ⚡ incidencias: {len(outages or [])} outage(s), "
               f"{len(priority_ofs or [])} OF(s) prioritario(s)")
+    if replan_from_ts:
+        print(f"  🔒 replan_from_ts: {replan_from_ts}")
+    # Capture original (linea, fecha, turno) per block_id so we can verify
+    # that frozen OFs were not moved by the optimizer.
+    orig_slot = {str(r["block_id"]): (int(r["linea"]),
+                                      pd.Timestamp(r["fecha"]).date().isoformat(),
+                                      str(r.get("turno") or "M"))
+                 for _, r in blocks.iterrows()}
     result = optimize_plan_v3(
         blocks, str(LOOKUPS), str(MODELS),
         objective="p90", time_budget_sec=240, max_iter=30, top_k_prevs=10,
         outages=outages, priority_ofs=priority_ofs,
+        replan_from_ts=replan_from_ts,
     )
     opt_p90 = result["optimized_score"]
     delta   = result["delta_oee_pts"]
@@ -147,6 +169,39 @@ def run_one(name: str) -> dict:
               f"{inc_info.get('priority_ofs_placed', 0)} priority placed · "
               f"{inc_info.get('evictions', 0)} OF(s) desplazado(s) · "
               f"{len(inc_info.get('priority_ofs_failed', []))} priority fail(s)")
+
+    # Freeze-integrity check: any frozen OF that ended up in a different
+    # (línea, fecha, turno) than its original slot is a bug.
+    frozen_moved = []
+    if replan_from_ts and inc_info.get("frozen_count", 0):
+        best_blocks = result.get("best_blocks")
+        if best_blocks is not None and not best_blocks.empty:
+            replan_ts = pd.Timestamp(replan_from_ts)
+            for _, r in best_blocks.iterrows():
+                bid = str(r["block_id"])
+                orig = orig_slot.get(bid)
+                if orig is None:
+                    continue
+                # An OF is "frozen" iff its ORIGINAL start_ts <= replan_ts
+                # (we replicate the same rule build_jobs_and_slots applies)
+                orig_block = blocks[blocks["block_id"].astype(str) == bid]
+                if orig_block.empty:
+                    continue
+                try:
+                    orig_start = pd.Timestamp(orig_block.iloc[0]["start_ts"])
+                except Exception:
+                    continue
+                if orig_start > replan_ts:
+                    continue   # not frozen, skip
+                # Frozen OF — must keep its original slot
+                cur = (int(r["linea"]),
+                       pd.Timestamp(r["fecha"]).date().isoformat(),
+                       str(r.get("turno") or "M"))
+                if cur != orig:
+                    frozen_moved.append((bid, orig, cur))
+        print(f"  🔒 frozen: {inc_info.get('frozen_count')} OF(s) "
+              f"({inc_info.get('frozen_hl', 0):,} HL)  ·  "
+              f"frozen-moved: {len(frozen_moved)} (must be 0)")
     # Check audit for block_violations on outage slots
     audit = result.get("audit", {}) or {}
     blk_violations = audit.get("block_violations", [])
@@ -178,6 +233,10 @@ def run_one(name: str) -> dict:
         "outage_violations": len(outage_violations),
         "prio_violations":  len(prio_violations),
         "best_blocks":      result.get("best_blocks"),
+        "replan_from_ts":   replan_from_ts,
+        "frozen_count":     int(inc_info.get("frozen_count", 0)),
+        "frozen_hl":        int(inc_info.get("frozen_hl", 0)),
+        "frozen_moved":     len(frozen_moved),
     }
 
 
@@ -223,6 +282,7 @@ def write_report(rows: list[dict]) -> None:
     r08 = _f("08_outage_basico.xlsx")
     r09 = _f("09_priority_holgado.xlsx")
     r10 = _f("10_priority_evict.xlsx")
+    r11 = _f("11_replan_midweek.xlsx")
 
     def _yn(passed: bool) -> str:
         return "✅ PASS" if passed else "❌ FAIL"
@@ -264,6 +324,11 @@ def write_report(rows: list[dict]) -> None:
     prio_evict_ok = (r10
                      and r10["incidencias"].get("priority_ofs_placed", 0) == 1
                      and r10["prio_violations"] == 0)
+
+    # Mid-week replan: 11 = ≥1 OF frozen AND NO frozen OF was moved
+    replan_ok = (r11
+                 and r11.get("frozen_count", 0) >= 1
+                 and r11.get("frozen_moved", 0) == 0)
 
     lines += [
         "",
@@ -309,6 +374,12 @@ def write_report(rows: list[dict]) -> None:
         f"{r10['incidencias'].get('priority_ofs_placed', 0) if r10 else '?'}, "
         f"evictions={r10['incidencias'].get('evictions', 0) if r10 else '?'} (>=1 esperado), "
         f"priority_violations={r10['prio_violations'] if r10 else '?'}.",
+        f"- **11** (`replan_midweek` con replan_from_ts=Wed 10:00, outage L17 Wed PM): "
+        f"{_yn(replan_ok)}  — frozen={r11.get('frozen_count', 0) if r11 else '?'} OF(s) "
+        f"({r11.get('frozen_hl', 0) if r11 else '?'} HL "
+        f"ya producidos / en curso al momento del replán), "
+        f"frozen_moved={r11.get('frozen_moved', 0) if r11 else '?'} (debe ser 0 — "
+        f"el optimizador no puede tocar OFs ya en inventario o mid-shift).",
         "",
         "## Notas",
         "",

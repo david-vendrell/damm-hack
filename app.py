@@ -45,6 +45,7 @@ def _optimize_pipeline_v3(
     objective: str,
     outages: list[dict] | None = None,
     priority_ofs: list[dict] | None = None,
+    replan_from_ts: str | None = None,
 ) -> tuple[dict, dict]:
     blocks, meta = parse_planning_excel(xlsx_file, FEASIBILITY)
     if blocks.empty:
@@ -62,6 +63,7 @@ def _optimize_pipeline_v3(
         top_k_prevs=10,        # was 20 — halves lookup size + precompute time
         outages=outages,
         priority_ofs=priority_ofs,
+        replan_from_ts=replan_from_ts,
     )
     return result, meta
 
@@ -221,9 +223,14 @@ def _swap_log_v3_table(swap_log: list[dict]) -> pd.DataFrame:
     rows = []
     for i, s in enumerate(swap_log, 1):
         mt = s.get("move_type", "optimization")
+        label = type_label.get(mt, mt)
+        # For pure optimization moves, distinguish required (forced by an
+        # incident — origin slot was blocked) from optional (free improvement).
+        if mt == "optimization":
+            label = "🔧 Obligatorio" if s.get("is_required") else "💡 Opcional"
         rows.append({
             "#":              i,
-            "Tipo":           type_label.get(mt, mt),
+            "Tipo":           label,
             "SKU":            s["sku"],
             "Desde":          _fmt_loc(s.get("from_linea"), s.get("from_fecha"), s.get("from_turno")),
             "Hacia":          _fmt_loc(s.get("to_linea"), s.get("to_fecha"), s.get("to_turno")),
@@ -250,6 +257,219 @@ def _parse_json_param(raw: str | None, name: str) -> tuple[list[dict], str | Non
     if not isinstance(parsed, list):
         return [], f"`{name}` debe ser una lista JSON (`[...]`), no {type(parsed).__name__}"
     return parsed, None
+
+
+def _verdict(cost_pts: float, displaced_hl: int, placed: bool = True) -> tuple[str, str]:
+    """Map (cost in pts, HL desplazados, placed) → (badge, recommendation).
+
+    `cost_pts` convention: > 0 = accepting the OF *helped* OEE,
+                            < 0 = it hurt OEE (the "true" cost case).
+
+    Logic:
+      · If the OF couldn't be placed at all → IMPOSIBLE
+      · If OEE went UP or held flat, only severe churn (>5 000 HL) flags it
+      · If OEE went DOWN, threshold by penalty magnitude AND displaced HL
+        - > 2.0 pts down OR > 2 000 HL displaced → EVITAR
+        - > 0.5 pts down OR >   500 HL displaced → REVISAR
+        - otherwise → PROCEDE
+    """
+    if not placed:
+        return "🚫 IMPOSIBLE", "El optimizador no encontró slot factible antes del plazo."
+
+    # OEE neutral or positive (the priority OF helped the plan): the only
+    # concern is operational churn. Be lenient.
+    if cost_pts >= 0:
+        if displaced_hl > 5000:
+            return "🟠 REVISAR", (
+                "OEE no empeora, pero la inserción reorganiza mucha producción "
+                "(>5 000 HL). Confirma que el equipo pueda gestionar la churn."
+            )
+        return "🟢 PROCEDE", (
+            "Impacto bajo: acepta el pedido sin penalización de OEE."
+        )
+
+    # Real cost: incident hurt OEE. Apply the strict thresholds.
+    pen = -cost_pts
+    if pen > 2.0 or displaced_hl > 2000:
+        return "🔴 EVITAR", (
+            f"Coste alto ({pen:.2f} pts de OEE) — valora rechazar el pedido "
+            f"o renegociar plazo con el cliente."
+        )
+    if pen > 0.5 or displaced_hl > 500:
+        return "🟠 REVISAR", (
+            f"Coste moderado ({pen:.2f} pts) — decisión del planificador "
+            f"frente al valor comercial del pedido."
+        )
+    return "🟢 PROCEDE", (
+        "Impacto bajo — se puede aceptar sin penalización notable."
+    )
+
+
+def _compute_incident_cost(
+    path: str,
+    objective: str,
+    outages: list[dict],
+    priority_ofs: list[dict],
+    full_result: dict,
+    replan_from_ts: str | None = None,
+) -> dict | None:
+    """Run the optimizer a second time WITHOUT incidents and diff against
+    the full result so we can show the planner the true cost.
+
+    The clean pass MUST use the same `replan_from_ts` as the full pass so
+    that the frozen baseline (already-produced OFs) stays identical — the
+    cost is computed only against the rearrangeable remainder.
+
+    Returns None when no incidents are declared (nothing to compare).
+    """
+    if not (outages or priority_ofs):
+        return None
+    try:
+        clean_result, _ = _optimize_pipeline_v3(
+            path, objective, [], [], replan_from_ts=replan_from_ts,
+        )
+    except Exception as exc:
+        return {"error": f"clean pass failed: {exc}"}
+    if not clean_result or clean_result.get("best_blocks", pd.DataFrame()).empty:
+        return None
+
+    clean_score = float(clean_result["optimized_score"])
+    full_score  = float(full_result["optimized_score"])
+    # cost_pts > 0 = better with incidents · < 0 = worse · = 0 = no impact
+    cost_pts = (full_score - clean_score) * 100.0
+
+    # Displaced HL: sum HL of baseline OFs whose final (línea, fecha, turno)
+    # differs between the clean and full plans. Excludes priority OFs (they
+    # don't exist in the clean plan so the join is trivially missing).
+    clean_blocks = clean_result["best_blocks"]
+    full_blocks  = full_result["best_blocks"]
+
+    def _slot_key(row):
+        try:
+            return (int(row["linea"]),
+                    pd.Timestamp(row["fecha"]).date().isoformat(),
+                    str(row.get("turno") or "M"))
+        except Exception:
+            return None
+
+    clean_idx = {str(r["block_id"]): _slot_key(r) for _, r in clean_blocks.iterrows()}
+    full_idx  = {str(r["block_id"]): _slot_key(r) for _, r in full_blocks.iterrows()}
+
+    displaced_hl = 0
+    common = set(clean_idx) & set(full_idx)
+    for bid in common:
+        if clean_idx[bid] != full_idx[bid]:
+            row = full_blocks[full_blocks["block_id"] == bid]
+            if len(row):
+                hl = row.iloc[0].get("hl")
+                if pd.notna(hl):
+                    displaced_hl += int(hl)
+
+    return {
+        "clean_score":    clean_score,
+        "full_score":     full_score,
+        "cost_pts":       cost_pts,
+        "displaced_hl":   int(displaced_hl),
+        "clean_elapsed":  float(clean_result.get("elapsed_sec", 0.0)),
+    }
+
+
+def _cost_analysis_section(
+    cost_info: dict | None,
+    outages: list[dict],
+    priority_ofs: list[dict],
+    incidencias: dict,
+    full_result: dict | None = None,
+) -> str:
+    """Render the cost-of-incident block in the summary markdown. Returns
+    empty string when no incidents were declared.
+
+    When `full_result` is provided AND it carries `score_required_only`,
+    the table expands to 3 rows so the planner can see what the cost would
+    be if the optimizer applied only the moves *forced* by the incident
+    (no optional improvements) vs the fully-optimized output.
+    """
+    if not cost_info or "error" in cost_info:
+        return ""
+    clean_pct    = cost_info["clean_score"] * 100
+    full_pct     = cost_info["full_score"]  * 100
+    cost_pts     = cost_info["cost_pts"]
+    displaced_hl = cost_info["displaced_hl"]
+    sign_arrow   = "▼" if cost_pts < -0.01 else ("▲" if cost_pts > 0.01 else "=")
+
+    out: list[str] = ["", "#### ⚖️ Coste de las incidencias", ""]
+    out.append("|                                | OEE de la fábrica | Movimientos |")
+    out.append("|--------------------------------|------------------:|------------:|")
+    out.append(f"| Plan original (sin incidencia) | **{clean_pct:.2f}%** | — |")
+
+    # 3-row mode when the optimizer reported a required-only counterfactual
+    req_pct: float | None = None
+    n_req = n_opt = 0
+    if full_result is not None:
+        sro = full_result.get("score_required_only")
+        n_req = int(full_result.get("n_required_moves", 0))
+        n_opt = int(full_result.get("n_optional_moves", 0))
+        if sro is not None and (n_req or n_opt):
+            req_pct = float(sro) * 100
+            out.append(f"| Replan mínimo (sólo lo obligatorio) | **{req_pct:.2f}%** | "
+                       f"{n_req} 🔧 obligatorio(s) |")
+
+    out.append(f"| Replan optimizado (con mejoras) | **{full_pct:.2f}%** | "
+               f"{n_req + n_opt} totales ({n_opt} 💡 opcionales) |")
+    out.append(f"| **Diferencia (plan original → optimizado)** | "
+               f"**{sign_arrow} {cost_pts:+.2f} pts**  ·  **{displaced_hl:,} HL** reasignados | |")
+    out.append("")
+
+    # If we have the 3-row breakdown, add interpretation
+    if req_pct is not None:
+        coste_real = clean_pct - req_pct           # how much the incident costs even at minimum disruption
+        mejora_opcional = full_pct - req_pct       # how much the optimizer adds on top
+        out.append(f"> **Coste real de la incidencia** (inevitable, aunque sólo apliquemos lo obligatorio): "
+                   f"**{coste_real:+.2f} pts**.")
+        if n_opt:
+            out.append(f">")
+            out.append(f"> **Mejora opcional disponible**: aceptar los **{n_opt} cambios marcados 💡 OPCIONAL** "
+                       f"añade **{mejora_opcional:+.2f} pts** extra. Es decisión del planificador "
+                       f"si la mejora justifica la disrupción adicional para el equipo.")
+        out.append("")
+
+    if outages:
+        out.append("> ⛔ Las **outages** son inevitables. El número de arriba es el "
+                   "coste que esta semana va a asumir por la avería declarada.")
+        out.append("")
+
+    if priority_ofs:
+        # Per-priority verdict (cost prorated when >1 priority OF — simplification)
+        placed_set = {str(j.get("sku")) for j in (incidencias.get("priority_ofs_failed") or [])}
+        n_prio = len(priority_ofs)
+        cost_per_prio = cost_pts / n_prio if n_prio else 0.0
+        hl_per_prio   = displaced_hl / n_prio if n_prio else 0
+        out.append("##### 📋 Veredicto por OF prioritario")
+        out.append("")
+        out.append("| # | SKU | HL | Plazo | Coste (atribuido) | HL desplazados | Veredicto | Recomendación |")
+        out.append("|---|-----|---:|-------|------------------:|---------------:|-----------|---------------|")
+        for i, p in enumerate(priority_ofs, 1):
+            sku = str(p.get("sku", "?"))
+            placed = sku not in placed_set
+            badge, advice = _verdict(cost_per_prio, int(hl_per_prio), placed=placed)
+            hl_val = p.get("hl", "?")
+            try:
+                hl_val_disp = f"{int(hl_val):,}"
+            except (TypeError, ValueError):
+                hl_val_disp = str(hl_val)
+            out.append(
+                f"| {i} | `{sku}` | {hl_val_disp} | {p.get('deadline','?')} | "
+                f"{cost_per_prio:+.2f} pts | {int(hl_per_prio):,} HL | "
+                f"{badge} | {advice} |"
+            )
+        out.append("")
+        if n_prio > 1:
+            out.append(f"> *Coste y desplazamientos distribuidos por igual entre los "
+                       f"{n_prio} OFs prioritarios (simplificación; "
+                       f"para atribución exacta habría que ejecutar el optimizador 1 vez por OF).*")
+            out.append("")
+
+    return "\n".join(out) + "\n"
 
 
 def _incidencias_section(incidencias: dict) -> str:
@@ -378,6 +598,7 @@ def optimize_v3(
     aggressive: bool,
     outages_json: str = "",
     priority_ofs_json: str = "",
+    replan_from_ts: str = "",
     progress=gr.Progress(track_tqdm=False),
 ):
     empty = pd.DataFrame()
@@ -394,12 +615,37 @@ def optimize_v3(
     if err2:
         return (f"❌ {err2}", empty, empty, empty)
 
+    # Mid-week replan: timestamp must parse if non-empty; null/empty → initial planning
+    replan_ts_param: str | None = None
+    if replan_from_ts and replan_from_ts.strip():
+        try:
+            replan_ts_param = pd.Timestamp(replan_from_ts.strip()).isoformat()
+        except Exception as exc:
+            return (f"❌ replan_from_ts no es timestamp válido: {exc}", empty, empty, empty)
+
     progress(0.05, desc=f"Parseando Excel (modo {obj_label})…")
     try:
         progress(0.15, desc="Construyendo lookup prev-aware (~30s)…")
-        result, meta = _optimize_pipeline_v3(path, objective, outages, priority_ofs)
+        result, meta = _optimize_pipeline_v3(
+            path, objective, outages, priority_ofs, replan_ts_param,
+        )
     except Exception as exc:
         return (f"❌ Error optimizando: {exc}", empty, empty, empty)
+
+    # Cost-of-incidents analysis: when the planner declared any outage or
+    # priority OF, re-run the optimizer with NO incidents and diff. This
+    # tells them what the disruption actually cost (in OEE pts + HL).
+    cost_info = None
+    if (outages or priority_ofs) and result.get("best_blocks") is not None \
+            and not result["best_blocks"].empty:
+        try:
+            progress(0.85, desc="Calculando coste de las incidencias…")
+            cost_info = _compute_incident_cost(
+                path, objective, outages, priority_ofs, result,
+                replan_from_ts=replan_ts_param,
+            )
+        except Exception as exc:
+            cost_info = {"error": str(exc)}
 
     if not result or not result.get("best_blocks", pd.DataFrame()).shape[0]:
         return ("⚠️ No se han encontrado bloques válidos para optimizar.",
@@ -437,6 +683,23 @@ def optimize_v3(
     progress(0.95, desc="Generando resumen…")
     status_emoji = "✅" if audit_ok else "⚠️"
     incidencias_md = _incidencias_section(result.get("incidencias", {}))
+    cost_md = _cost_analysis_section(
+        cost_info, outages, priority_ofs, result.get("incidencias", {}),
+        full_result=result,
+    )
+    # Mid-week replan header — shown only if the planner passed a replan_from_ts
+    replan_md = ""
+    if replan_ts_param:
+        inc = result.get("incidencias", {})
+        n_frozen = int(inc.get("frozen_count", 0))
+        hl_frozen = int(inc.get("frozen_hl", 0))
+        replan_md = (
+            f"\n#### 🔒 Replanificación desde {replan_ts_param}\n\n"
+            f"- **{n_frozen} OF(s) congelado(s)** ({hl_frozen:,} HL ya producidos "
+            f"o en curso) — el optimizador no los toca.\n"
+            f"- El optimizador sólo reorganiza los OFs **posteriores al "
+            f"momento del replán**.\n"
+        )
 
     # Build per-línea diagnostic markdown (with Simpson's-paradox note)
     per_line_md_rows = []
@@ -465,7 +728,7 @@ def optimize_v3(
 - **{total_hl:,} HL** totales planificados (incluye OF(s) prioritario(s) si los hay)
 - Modo: **{obj_label}**
 {mant_line}
-{incidencias_md}
+{replan_md}{incidencias_md}{cost_md}
 #### Detalle operacional
 {weekly}
 
@@ -558,6 +821,16 @@ with gr.Blocks(
                     placeholder='[{"sku": "ED13LTW", "hl": 250, "deadline": "2026-05-28", "reason": "Pedido urgente cliente X"}]',
                     lines=3,
                 )
+                replan_from_ts_in = gr.Textbox(
+                    label="🔒 Replan desde — timestamp ISO (opcional, mid-week)",
+                    placeholder="2026-05-27T10:00:00   (vacío = planificación inicial, sin OFs congelados)",
+                    lines=1,
+                    info=(
+                        "Cuando se especifica, los OFs cuyo start_ts es anterior a "
+                        "este momento se PINEAN (no se mueven): ya están producidos "
+                        "o en curso. El optimizador sólo replanifica los OFs futuros."
+                    ),
+                )
             gr.Markdown(
                 "> El sistema usa un modelo **LightGBM quantile** entrenado con "
                 "~2 200 OFs históricos de 2025. **`p90`** = techo de OEE razonablemente "
@@ -601,7 +874,7 @@ with gr.Blocks(
     )
     btn_optimize.click(
         fn=optimize_v3,
-        inputs=[file_in, aggressive, outages_in, priority_ofs_in],
+        inputs=[file_in, aggressive, outages_in, priority_ofs_in, replan_from_ts_in],
         outputs=[opt_summary, opt_day_tbl, opt_line_tbl, opt_swap_tbl],
     )
 
