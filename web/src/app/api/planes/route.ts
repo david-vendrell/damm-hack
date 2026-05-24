@@ -56,5 +56,16 @@ export async function POST(req: NextRequest) {
     buf,
     file.name,
   );
+  // Cache the full AnalisisPlan back onto the Plan row so /validar can
+  // rehydrate when the user navigates away and comes back — without the
+  // ~13s optimizer round-trip. /api/planes/latest/full reads this back.
+  try {
+    await prisma.plan.update({
+      where: { id: plan.id },
+      data: { analisisJson: JSON.stringify(analisis) },
+    });
+  } catch (err) {
+    console.warn('[planes] failed to cache analisisJson:', err);
+  }
   return NextResponse.json(analisis);
 }

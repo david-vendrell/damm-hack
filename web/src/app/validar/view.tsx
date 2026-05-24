@@ -1,7 +1,7 @@
 'use client';
 
 import { useMutation, useQuery } from '@tanstack/react-query';
-import { useMemo, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import {
   Button, Card, CardHeader, KPI, SectionTitle,
   Skeleton, StatBlock, StatStrip,
@@ -31,12 +31,34 @@ async function postFile<T>(url: string, file: File): Promise<T> {
 
 export function ValidarView() {
   const [analisis, setAnalisis] = useState<AnalisisPlan | null>(null);
+  // Distinguishes "haven't fetched yet" from "fetched, no plan exists"
+  // so we don't flash the dropzone before the rehydration check finishes.
+  const [hydrated, setHydrated] = useState(false);
   // All-or-nothing: the optimizer produced ONE holistic plan, so the planner
   // either accepts the whole bundle or doesn't. No per-recommendation selection.
   const [appliedAll, setAppliedAll] = useState(false);
   const [drawerFilas, setDrawerFilas] = useState<FilaPlan[] | null>(null);
   const fileRef = useRef<HTMLInputElement>(null);
   const [drag, setDrag] = useState(false);
+
+  // On mount, rehydrate from the most-recently uploaded plan so the user
+  // sees their work when they come back after visiting /urgencias etc.
+  // /api/planes/latest/full returns the cached AnalisisPlan JSON written by
+  // /api/planes on upload — no optimizer re-run needed.
+  useEffect(() => {
+    let cancelled = false;
+    fetch('/api/planes/latest/full')
+      .then((r) => (r.ok ? r.json() : null))
+      .then((data) => {
+        if (cancelled) return;
+        if (data && !('error' in data)) setAnalisis(data as AnalisisPlan);
+        setHydrated(true);
+      })
+      .catch(() => {
+        if (!cancelled) setHydrated(true);
+      });
+    return () => { cancelled = true; };
+  }, []);
 
   const upload = useMutation({
     mutationFn: (file: File) => postFile<AnalisisPlan>('/api/planes', file),
@@ -81,8 +103,13 @@ export function ValidarView() {
         </SectionTitle>
       </header>
 
-      {/* Dropzone — only shown until a plan is loaded */}
-      {!analisis && (
+      {/* Briefly suppress the dropzone while we check the DB for a recent
+          plan to rehydrate — avoids a flash of "no plan" between renders */}
+      {!analisis && !hydrated && !upload.isPending && (
+        <Skeleton className="h-40 w-full" />
+      )}
+
+      {!analisis && hydrated && (
         <UploadDropzone
           drag={drag}
           setDrag={setDrag}
