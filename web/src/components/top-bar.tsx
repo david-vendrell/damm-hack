@@ -1,10 +1,14 @@
 'use client';
 
 import { usePathname } from 'next/navigation';
-import { Bell, Moon, Plus, Sun } from './icons';
+import { Bell, Moon, Sun } from './icons';
 import { ScopeBar } from './scope-bar';
 
 const TITLES: Record<string, { title: string; subtitle: string }> = {
+  '/': {
+    title: 'Simulador',
+    subtitle: 'Plan semanal en vivo · L14 · L17 · L19 — El Prat',
+  },
   '/observabilidad': {
     title: 'Observabilidad',
     subtitle: 'Histórico real · líneas 14 · 17 · 19 — El Prat',
@@ -25,7 +29,12 @@ const TITLES: Record<string, { title: string; subtitle: string }> = {
 
 export function TopBar() {
   const pathname = usePathname();
-  const key = Object.keys(TITLES).find((k) => pathname.startsWith(k));
+  const key =
+    pathname === '/'
+      ? '/'
+      : Object.keys(TITLES)
+          .filter((k) => k !== '/')
+          .find((k) => pathname.startsWith(k));
   const meta = key ? TITLES[key] : { title: 'LineWise', subtitle: 'Damm — operación de líneas' };
 
   return (
@@ -71,30 +80,6 @@ export function TopBar() {
           </button>
         </div>
       </div>
-
-      <WorkspaceTabs />
     </header>
-  );
-}
-
-function WorkspaceTabs() {
-  // Placeholder for the multi-workspace future. Today: single "Default" view.
-  return (
-    <div className="flex items-end gap-1 border-t border-hairline/60 bg-cream/40 px-8">
-      <button
-        type="button"
-        className="relative -mb-px flex items-center gap-2 border-b-2 border-damm bg-cream px-3.5 py-2 text-xs font-medium text-ink"
-      >
-        <span className="font-mono text-[9px] uppercase tracking-[0.16em] text-ink-3">01</span>
-        Vista por defecto
-      </button>
-      <button
-        type="button"
-        className="ml-1 flex h-7 w-7 items-center justify-center rounded-full text-ink-3 hover:bg-linen hover:text-ink"
-        aria-label="Nueva vista"
-      >
-        <Plus className="h-3.5 w-3.5" strokeWidth={1.75} />
-      </button>
-    </div>
   );
 }

@@ -9,7 +9,7 @@ import type { ChartConfig } from '@/types';
 const EXAMPLES = [
   'OEE mensual por línea en 2025',
   'Top 10 marcas por horas de paro',
-  'Horas de cambio por formato Q1 2026',
+  'Horas de cambio por formato en 2025',
 ];
 
 interface AskResponse {
@@ -30,14 +30,14 @@ interface AskBarProps {
 
 const ERROR_MAP: Record<string, string> = {
   env_missing:
-    'Configura GOOGLE_CLOUD_PROJECT y GOOGLE_CLOUD_ACCESS_TOKEN en `.env.local` y reinicia el servidor.',
-  token_expired:
-    'Token de Vertex caducado. Renuévalo con `gcloud auth print-access-token` y reinicia.',
+    'Configura `OPENAI_API_KEY` en `.env.local` y reinicia el servidor.',
+  invalid_key:
+    'Clave de OpenAI inválida o sin permiso. Revisa `OPENAI_API_KEY`.',
   quota_exceeded:
-    'Sin cuota en Vertex para este modelo. Solicita un aumento en la consola de GCP (Vertex AI → Quotas, publisher: anthropic).',
-  no_tool_call: 'Claude no devolvió una configuración válida. Reformula la pregunta.',
+    'Sin cuota en OpenAI para este modelo. Revisa tu plan en platform.openai.com.',
+  no_tool_call: 'ChatGPT no devolvió una configuración válida. Reformula la pregunta.',
   invalid_config: 'La configuración generada no era válida. Reformula la pregunta.',
-  upstream: 'Vertex respondió con un error. Reintenta en unos segundos.',
+  upstream: 'OpenAI respondió con un error. Reintenta en unos segundos.',
   empty_prompt: 'Escribe una pregunta.',
   too_long: 'La pregunta es demasiado larga (máx. 600 caracteres).',
 };
@@ -85,14 +85,14 @@ export function AskBar({ currentConfig, onProposed }: AskBarProps) {
     : null;
 
   return (
-    <Card aria-label="Pregunta a Claude" className="overflow-hidden">
+    <Card aria-label="Pregunta a ChatGPT" className="overflow-hidden">
       <div className="flex items-center justify-between border-b border-hairline bg-bone/40 px-5 py-2.5">
         <div className="flex items-center gap-2 text-[11px] uppercase tracking-wider text-ink-3">
           <span className="inline-block h-1.5 w-1.5 rounded-full bg-damm" />
-          Pregunta a Claude
+          Pregunta a ChatGPT
         </div>
         <span className="hidden text-[10px] uppercase tracking-wider text-ink-4 md:inline">
-          Vertex · {process.env.NEXT_PUBLIC_ANTHROPIC_MODEL ?? 'claude-opus-4-7'}
+          OpenAI · {process.env.NEXT_PUBLIC_OPENAI_MODEL ?? 'gpt-4o-mini'}
         </span>
       </div>
 

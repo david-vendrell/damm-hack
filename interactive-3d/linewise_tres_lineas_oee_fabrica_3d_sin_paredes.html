@@ -1,5 +1,18 @@
+<script>
+(function(){
+  try {
+    var embedded = new URLSearchParams(location.search).get('embedded') === '1';
+    if (embedded) document.documentElement.classList.add('lw-embedded');
+  } catch (e) {}
+})();
+</script>
 <style>
 html,body{margin:0;padding:0;background:#05080f;height:100%;overflow:hidden}
+html.lw-embedded #lw-top-strip,
+html.lw-embedded #linecards,
+html.lw-embedded #overlay-sim,
+html.lw-embedded #legend,
+html.lw-embedded #panel { display:none !important; }
 @keyframes lw-shimmer{0%{transform:translateX(-100%)}100%{transform:translateX(220%)}}
 .lw-bar-fill{position:relative;overflow:hidden}
 .lw-bar-fill::after{content:'';position:absolute;inset:0;width:35%;background:linear-gradient(90deg,transparent,rgba(255,255,255,0.55),transparent);animation:lw-shimmer 2.4s linear infinite}
@@ -9,12 +22,6 @@ html,body{margin:0;padding:0;background:#05080f;height:100%;overflow:hidden}
 .lw-demo-btn:hover{box-shadow:0 0 18px 1px rgba(124,58,237,.55);transform:translateY(-1px)}
 .lw-demo-btn.lw-active{background:linear-gradient(135deg,#ef4444,#f59e0b);box-shadow:0 0 22px 1px rgba(245,158,11,.55)}
 .lw-glow-dot{box-shadow:0 0 12px 2px currentColor}
-#slowmo-badge{position:absolute;top:60px;left:50%;transform:translateX(-50%) translateY(-8px);display:none;align-items:center;gap:10px;padding:9px 16px;background:linear-gradient(135deg,rgba(15,23,42,0.92),rgba(30,41,59,0.86));border:1px solid rgba(253,224,71,0.55);border-radius:30px;color:#fde047;font-size:13px;font-weight:600;letter-spacing:1.4px;backdrop-filter:blur(10px);box-shadow:0 0 30px rgba(253,224,71,0.4),inset 0 1px 0 rgba(255,255,255,0.08);z-index:5;opacity:0;transition:opacity .35s ease,transform .35s ease;pointer-events:none}
-#slowmo-badge.lw-visible{display:flex;opacity:1;transform:translateX(-50%) translateY(0)}
-#slowmo-badge .lw-sm-icon{font-size:18px;filter:drop-shadow(0 0 6px rgba(253,224,71,0.7))}
-#slowmo-badge .lw-sm-rate{font-variant-numeric:tabular-nums;font-size:14px;color:#fff;text-shadow:0 0 10px rgba(253,224,71,0.6)}
-#slowmo-badge .lw-sm-bar{width:80px;height:3px;background:rgba(253,224,71,0.18);border-radius:2px;overflow:hidden}
-#slowmo-badge .lw-sm-bar-fill{height:100%;width:0%;background:linear-gradient(90deg,#fde047,#fbbf24);box-shadow:0 0 8px #fde047;transition:width .12s linear}
 </style>
 <div id="scene-wrap" style="position:fixed;inset:0;width:100vw;height:100vh;overflow:hidden;background:#05080f;font-family:var(--font-sans),system-ui,sans-serif">
   <div id="canvas-holder" style="position:absolute;inset:0"></div>
@@ -24,14 +31,13 @@ html,body{margin:0;padding:0;background:#05080f;height:100%;overflow:hidden}
     <div id="lw-loading-detail" style="font-size:11px;color:#64748b;font-variant-numeric:tabular-nums">0 / 0</div>
   </div>
 
-  <div style="position:absolute;top:16px;left:18px;color:#cbd5e1;pointer-events:none;z-index:3">
+  <div id="lw-top-strip" style="position:absolute;top:16px;left:18px;color:#cbd5e1;pointer-events:none;z-index:3">
     <div style="font-size:16px;font-weight:500;color:#f1f5f9;letter-spacing:.2px">LineWise · El Prat · Líneas de latas</div>
     <div id="subtitle" style="font-size:12px;color:#8ca0bd;margin-top:3px">Simulación del plan semanal · L14 · L17 · L19 — color = OEE previsto · arrastra para girar · clic en una máquina</div>
   </div>
 
   <div id="linecards" style="position:absolute;top:62px;right:16px;display:flex;flex-direction:column;gap:8px;pointer-events:none;z-index:3"></div>
 
-  <div id="slowmo-badge"><span class="lw-sm-icon">🎬</span><span>SLOW-MO</span><span class="lw-sm-rate" id="slowmo-rate">0.30×</span><span class="lw-sm-bar"><span class="lw-sm-bar-fill" id="slowmo-bar"></span></span></div>
 
   <!-- Plan simulation overlay: scrubber + play -->
   <div id="overlay-sim" style="position:absolute;left:50%;bottom:16px;transform:translateX(-50%);display:flex;align-items:center;gap:10px;padding:10px 14px;background:rgba(8,15,28,0.86);border:1px solid rgba(148,163,184,0.22);border-radius:11px;color:#e2e8f0;backdrop-filter:blur(7px);font-size:12px;z-index:4;min-width:620px">
@@ -40,10 +46,10 @@ html,body{margin:0;padding:0;background:#05080f;height:100%;overflow:hidden}
     <button id="sim-next" title="+ 1 h" style="background:transparent;color:#8ca0bd;border:1px solid rgba(148,163,184,0.25);width:26px;height:26px;border-radius:50%;cursor:pointer">›</button>
     <input id="sim-scrubber" type="range" min="0" max="1" value="0" step="any" style="flex:1;accent-color:#2563eb">
     <select id="sim-speed" title="Velocidad de simulación" style="background:#0c1422;color:#e2e8f0;border:1px solid rgba(148,163,184,0.25);padding:4px 6px;border-radius:6px;font-size:11px">
+      <option value="0.25" selected>0.25×</option>
+      <option value="0.5">0.5×</option>
       <option value="1">1×</option>
       <option value="2">2×</option>
-      <option value="4" selected>4×</option>
-      <option value="8">8×</option>
     </select>
     <span id="sim-time" style="font-weight:500;color:#f1f5f9;font-variant-numeric:tabular-nums;min-width:130px;text-align:right">—</span>
     <button id="sim-demo" class="lw-demo-btn" title="Demo guiada para presentación">▷ Demo</button>
@@ -798,7 +804,7 @@ html,body{margin:0;padding:0;background:#05080f;height:100%;overflow:hidden}
   let tMin=0,tMax=0,lastCtx=null;
   let playhead=0; // epoch ms
   let playing=false;
-  let speed=4; // multiplier on simSecondsPerTick
+  let speed=0.25; // multiplier on simSecondsPerTick
 
   if(P&&P.lines){
     Object.keys(PLAN_LINES).forEach(k=>{
@@ -878,6 +884,8 @@ html,body{margin:0;padding:0;background:#05080f;height:100%;overflow:hidden}
           brandColor:blk.brandColor, hl:blk.hl, turno:blk.turno,
           feasible:blk.feasible, feasReason:blk.feasReason,
           progress:dur>0?(playhead-blk.start)/dur:0,
+          start:blk.start, end:blk.end, startIso:blk.startIso, endIso:blk.endIso,
+          changeoverType:blk.changeoverType,
           idle:false,
         };
         // Trigger a flash on station(s) responsible for this changeover when
@@ -904,6 +912,24 @@ html,body{margin:0;padding:0;background:#05080f;height:100%;overflow:hidden}
     renderCards(ctx);
     // refresh the open detail panel so the block info stays in sync
     if(selected)show(selected);
+    if(window.parent!==window){
+      try{
+        const nextByLine={};
+        LINES.forEach(L=>{
+          const blocks=PLAN_LINES[L.id]||[];
+          const nx=blocks.find(b=>b.start>playhead);
+          if(nx) nextByLine[L.id]={sku:nx.sku,brand:nx.brand,brandColor:nx.brandColor,format:nx.format,startIso:nx.startIso,start:nx.start};
+        });
+        window.parent.postMessage({
+          type:'lw:tick',
+          playhead, tMin, tMax,
+          weekStart:P&&P.meta?P.meta.weekStart:null,
+          weekEnd:P&&P.meta?P.meta.weekEnd:null,
+          playing, speed,
+          ctx, next:nextByLine
+        },'*');
+      }catch(e){}
+    }
   }
 
   function setPlaying(on){
@@ -930,11 +956,27 @@ html,body{margin:0;padding:0;background:#05080f;height:100%;overflow:hidden}
   scrubber.addEventListener('input',e=>{setPlaying(false);applyPlanTime(parseFloat(e.target.value));});
   speedSel.addEventListener('change',e=>{speed=parseFloat(e.target.value)||1;});
 
+  // Parent-frame remote control (used when embedded inside the React shell).
+  window.addEventListener('message',ev=>{
+    const m=ev&&ev.data; if(!m||m.type!=='lw:cmd') return;
+    if(m.action==='play'){setPlaying(true);}
+    else if(m.action==='pause'){setPlaying(false);}
+    else if(m.action==='toggle'){setPlaying(!playing);}
+    else if(m.action==='seek'&&typeof m.value==='number'){applyPlanTime(m.value);}
+    else if(m.action==='nudge'&&typeof m.value==='number'){applyPlanTime(playhead+m.value);}
+    else if(m.action==='speed'&&typeof m.value==='number'){
+      speed=m.value; if(speedSel) speedSel.value=String(m.value);
+    }
+    else if(m.action==='reset'){setPlaying(false);applyPlanTime(tMin);}
+  });
+  // Announce readiness so the parent can request an initial tick.
+  if(window.parent!==window){
+    try{ window.parent.postMessage({type:'lw:ready'},'*'); }catch(e){}
+  }
+
   // ─── Demo: cinematic director (slowmo + always-moving camera) ─────────────
   const demoBtn=document.getElementById('sim-demo');
-  const slowmoBadge=document.getElementById('slowmo-badge');
-  const slowmoRateEl=document.getElementById('slowmo-rate');
-  const slowmoBarEl=document.getElementById('slowmo-bar');
+  // (slowmo badge removed — slowmo behaviour kept, just no on-screen indicator)
   let slowmoFactor=1.0;
 
   function _v(x,y,z){return new THREE.Vector3(x,y,z);}
@@ -1030,24 +1072,24 @@ html,body{margin:0;padding:0;background:#05080f;height:100%;overflow:hidden}
     const heroes=pickHeroEvents();
     const tl=[];
     // OPEN
-    tl.push({label:'OPEN', shot:shotEstablish(), simStart:tMin, simEnd:tMin+4*3600*1000, dur:6000, slowmo:false});
+    tl.push({label:'OPEN', shot:shotEstablish(), simStart:tMin, simEnd:tMin+4*3600*1000, dur:9500, slowmo:false});
     heroes.forEach((h,idx)=>{
       const prevEnd=tl[tl.length-1].simEnd;
       const cruiseEndSim=Math.max(prevEnd+60*60*1000, h.epoch - 25*60*1000);
       if(cruiseEndSim>prevEnd){
-        tl.push({label:'CRUISE', shot:shotLineDolly(h.line), simStart:prevEnd, simEnd:cruiseEndSim, dur:5500, slowmo:false});
+        tl.push({label:'CRUISE', shot:shotLineDolly(h.line), simStart:prevEnd, simEnd:cruiseEndSim, dur:9000, slowmo:false});
       }
-      tl.push({label:'APPROACH', shot:shotLowPushIn(h.line, h.station), simStart:cruiseEndSim, simEnd:h.epoch, dur:2800, slowmo:'ramp'});
-      tl.push({label:'HERO', shot:shotStationOrbit(h.line, h.station), simStart:h.epoch, simEnd:h.epoch+8*60*1000, dur:7500, slowmo:true, hero:h});
+      tl.push({label:'APPROACH', shot:shotLowPushIn(h.line, h.station), simStart:cruiseEndSim, simEnd:h.epoch, dur:5000, slowmo:'ramp'});
+      tl.push({label:'HERO', shot:shotStationOrbit(h.line, h.station), simStart:h.epoch, simEnd:h.epoch+8*60*1000, dur:11000, slowmo:true, hero:h});
     });
     // CLOSE
-    tl.push({label:'CLOSE', shot:shotPullBack(), simStart:tl[tl.length-1].simEnd, simEnd:tMax, dur:8000, slowmo:false});
+    tl.push({label:'CLOSE', shot:shotPullBack(), simStart:tl[tl.length-1].simEnd, simEnd:tMax, dur:12000, slowmo:false});
     return tl;
   }
 
   const demoState={
     active:false, timeline:[], idx:0, phaseStart:0, prevSpeed:4,
-    prevPose:null, crossfadeMs:450,
+    prevPose:null, crossfadeMs:1400,
     start(){
       if(!P||tMax<=tMin)return;
       this.active=true;
@@ -1073,7 +1115,6 @@ html,body{margin:0;padding:0;background:#05080f;height:100%;overflow:hidden}
       this.active=false;
       this.timeline=[]; this.idx=0;
       slowmoFactor=1.0;
-      slowmoBadge.classList.remove('lw-visible');
       setPlaying(false);
       speed=this.prevSpeed; speedSel.value=String(this.prevSpeed);
       if(controls){controls.enabled=true;}
@@ -1120,14 +1161,6 @@ html,body{margin:0;padding:0;background:#05080f;height:100%;overflow:hidden}
       if(cur.slowmo===true) targetFactor=0.3;
       else if(cur.slowmo==='ramp') targetFactor=_lerp(1.0, 0.3, _easeInOut(u));
       slowmoFactor=targetFactor;
-      // badge
-      if(slowmoFactor<0.95){
-        if(!slowmoBadge.classList.contains('lw-visible')) slowmoBadge.classList.add('lw-visible');
-        slowmoRateEl.textContent=slowmoFactor.toFixed(2)+'×';
-        slowmoBarEl.style.width=(u*100).toFixed(1)+'%';
-      } else {
-        slowmoBadge.classList.remove('lw-visible');
-      }
     }
   };
   window.__lwDemo=demoState;

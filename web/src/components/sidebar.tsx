@@ -11,6 +11,7 @@ import {
   ChevronsUpDown,
   ClipboardCheck,
   Command,
+  Factory,
   FileText,
   Search,
   Siren,
@@ -19,6 +20,7 @@ import {
 } from './icons';
 
 const NAV = [
+  { href: '/', label: 'Simulador', icon: Factory, hint: 'Plan semanal en vivo' },
   { href: '/observabilidad', label: 'Observabilidad', icon: Activity, hint: 'OEE · líneas · turnos' },
   { href: '/post-mortem', label: 'Post mortem', icon: ChartBar, hint: 'Pérdidas · causas raíz' },
   { href: '/validar', label: 'Validar plan', icon: ClipboardCheck, hint: 'Planificación propuesta' },
@@ -47,7 +49,7 @@ export function Sidebar() {
       {/* Brand */}
       <div className="px-5 pt-6 pb-5">
         <div className="flex items-center justify-between">
-          <Link href="/observabilidad" className="group flex items-baseline gap-2">
+          <Link href="/" className="group flex items-baseline gap-2">
             <DammMark />
             <div className="flex flex-col leading-none">
               <span className="serif text-[20px] font-semibold tracking-tight text-ink">Damm</span>
@@ -122,7 +124,7 @@ export function Sidebar() {
         <div className="eyebrow px-2 pb-2 text-ink-3">Operación</div>
         <ul className="space-y-0.5">
           {NAV.map(({ href, label, icon: Icon, hint }) => {
-            const active = pathname.startsWith(href);
+            const active = href === '/' ? pathname === '/' : pathname.startsWith(href);
             return (
               <li key={href}>
                 <Link

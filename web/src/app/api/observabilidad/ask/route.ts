@@ -1,5 +1,5 @@
 import { NextResponse } from 'next/server';
-import { getAnthropic, getModel, MissingEnvError } from '@/server/anthropic';
+import { getOpenAI, getModel, MissingEnvError } from '@/server/openai';
 import { DIMENSION_LIST, DIMENSIONS, MEASURE_LIST, MEASURES } from '@/server/query';
 import type {
   Aggregation,
@@ -22,59 +22,65 @@ const MEASURE_KEYS = MEASURE_LIST.map((m) => m.key);
 const DIM_KEYS = DIMENSION_LIST.map((d) => d.key);
 
 const refuseTool = {
-  name: 'refuse_off_topic',
-  description:
-    'Úsala SOLO cuando la pregunta del usuario no tenga relación con la producción cervecera de Damm (OEE, paros, cambios de formato, mantenimiento, volumen, líneas L14/L17/L19, marcas, formatos, canales, plan vs real, limpieza/CIP, etc.). NUNCA la uses para preguntas legítimas sobre estos temas.',
-  input_schema: {
-    type: 'object' as const,
-    additionalProperties: false,
-    required: ['reason'],
-    properties: {
-      reason: {
-        type: 'string',
-        description:
-          'Frase corta en español (≤ 25 palabras) explicando que la pregunta queda fuera del alcance de LineWise.',
+  type: 'function' as const,
+  function: {
+    name: 'refuse_off_topic',
+    description:
+      'Úsala SOLO cuando la pregunta del usuario no tenga relación con la producción cervecera de Damm (OEE, paros, cambios de formato, mantenimiento, volumen, líneas L14/L17/L19, marcas, formatos, canales, plan vs real, limpieza/CIP, etc.). NUNCA la uses para preguntas legítimas sobre estos temas.',
+    parameters: {
+      type: 'object' as const,
+      additionalProperties: false,
+      required: ['reason'],
+      properties: {
+        reason: {
+          type: 'string',
+          description:
+            'Frase corta en español (≤ 25 palabras) explicando que la pregunta queda fuera del alcance de LineWise.',
+        },
       },
     },
   },
 };
 
 const buildChartTool = {
-  name: 'build_chart',
-  description: 'Construye una configuración de gráfico para el constructor de Observabilidad de LineWise.',
-  input_schema: {
-    type: 'object' as const,
-    additionalProperties: false,
-    required: ['measure', 'aggregation', 'filters', 'dateRange', 'granularity', 'viz'],
-    properties: {
-      measure: { type: 'string', enum: MEASURE_KEYS },
-      aggregation: { type: 'string', enum: AGG_VALUES },
-      dimension: { type: 'string', enum: DIM_KEYS },
-      breakdown: { type: 'string', enum: DIM_KEYS },
-      filters: {
-        type: 'array',
-        items: {
-          type: 'object',
-          additionalProperties: false,
-          required: ['dim', 'values'],
-          properties: {
-            dim: { type: 'string', enum: DIM_KEYS },
-            values: { type: 'array', items: { type: 'string' }, minItems: 1 },
+  type: 'function' as const,
+  function: {
+    name: 'build_chart',
+    description: 'Construye una configuración de gráfico para el constructor de Observabilidad de LineWise.',
+    parameters: {
+      type: 'object' as const,
+      additionalProperties: false,
+      required: ['measure', 'aggregation', 'filters', 'dateRange', 'granularity', 'viz'],
+      properties: {
+        measure: { type: 'string', enum: MEASURE_KEYS },
+        aggregation: { type: 'string', enum: AGG_VALUES },
+        dimension: { type: 'string', enum: DIM_KEYS },
+        breakdown: { type: 'string', enum: DIM_KEYS },
+        filters: {
+          type: 'array',
+          items: {
+            type: 'object',
+            additionalProperties: false,
+            required: ['dim', 'values'],
+            properties: {
+              dim: { type: 'string', enum: DIM_KEYS },
+              values: { type: 'array', items: { type: 'string' }, minItems: 1 },
+            },
           },
         },
-      },
-      dateRange: {
-        type: 'object',
-        additionalProperties: false,
-        properties: {
-          from: { type: 'string', pattern: '^\\d{4}-\\d{2}-\\d{2}$' },
-          to: { type: 'string', pattern: '^\\d{4}-\\d{2}-\\d{2}$' },
-          preset: { type: 'string', enum: PRESET_VALUES },
+        dateRange: {
+          type: 'object',
+          additionalProperties: false,
+          properties: {
+            from: { type: 'string', pattern: '^\\d{4}-\\d{2}-\\d{2}$' },
+            to: { type: 'string', pattern: '^\\d{4}-\\d{2}-\\d{2}$' },
+            preset: { type: 'string', enum: PRESET_VALUES },
+          },
         },
+        granularity: { type: 'string', enum: GRAN_VALUES },
+        viz: { type: 'string', enum: VIZ_VALUES },
+        topN: { type: 'integer', minimum: 1, maximum: 50 },
       },
-      granularity: { type: 'string', enum: GRAN_VALUES },
-      viz: { type: 'string', enum: VIZ_VALUES },
-      topN: { type: 'integer', minimum: 1, maximum: 50 },
     },
   },
 };
@@ -103,7 +109,6 @@ Reglas duras:
 - Si la pregunta entra en el ámbito, DEBES llamar exactamente una vez a \`build_chart\`.
 - Si la pregunta NO trata sobre la producción cervecera de Damm (saludos sociales, chistes, política, programación, gastronomía, recetas, deportes, etc.), DEBES llamar a \`refuse_off_topic\` y nada más. No inventes un gráfico para temas fuera de alcance.
 - Antes de la llamada a \`build_chart\` puedes añadir UNA frase corta (≤ 25 palabras) en español explicando qué vas a construir. Nada más.
-- Antes de la llamada puedes añadir UNA frase corta (≤ 25 palabras) en español explicando qué vas a construir. Nada más.
 - Usa únicamente las claves de métrica y dimensión listadas abajo. No inventes claves.
 - Evolución temporal → \`dimension\` temporal (típicamente 'mesIso') + \`viz: 'line'\`. Ajusta \`granularity\` a 'day' | 'week' | 'month' según la palabra usada (día/diaria, semana/semanal, mes/mensual).
 - Comparación por categoría → \`viz: 'bar'\` (o 'stackedBar' si hay desglose) y \`dimension\` categórica; añade \`topN: 10\` si la pregunta dice "top".
@@ -114,6 +119,7 @@ Reglas duras:
 - Métricas en horas / hl / unidades / conteos → \`aggregation: 'sum'\` por defecto.
 - Si la pregunta es ambigua, elige la interpretación más natural y refleja la decisión en tu frase explicativa.
 - Filtra siempre con las claves canónicas: para líneas usa valores '14', '17', '19' (string).
+- Datos disponibles: año 2025 (enero–diciembre). Si el usuario no precisa año, usa \`preset: 'y2025'\`. Los presets móviles ('7d', '30d', '90d', 'ytd') suelen devolver vacío fuera de 2025.
 
 Métricas disponibles:
 ${measures}
@@ -227,11 +233,15 @@ function validateConfig(
   };
 }
 
-interface ContentBlock {
-  type: string;
-  text?: string;
-  name?: string;
-  input?: unknown;
+interface OpenAIToolCall {
+  id?: string;
+  type?: string;
+  function?: { name?: string; arguments?: string };
+}
+
+interface OpenAIMessage {
+  content?: string | null;
+  tool_calls?: OpenAIToolCall[] | null;
 }
 
 interface ToolCall {
@@ -240,17 +250,21 @@ interface ToolCall {
   explanation: string;
 }
 
-function extractToolCall(blocks: ContentBlock[]): ToolCall | null {
-  let explanation = '';
+function extractToolCall(message: OpenAIMessage | undefined): ToolCall | null {
+  if (!message) return null;
+  let explanation = typeof message.content === 'string' ? message.content.trim() : '';
   let toolName: ToolCall['tool'] | null = null;
   let input: unknown = null;
-  for (const b of blocks) {
-    if (b.type === 'text' && typeof b.text === 'string' && !explanation) {
-      explanation = b.text.trim();
-    }
-    if (b.type === 'tool_use' && (b.name === 'build_chart' || b.name === 'refuse_off_topic')) {
-      toolName = b.name;
-      input = b.input;
+  for (const tc of message.tool_calls ?? []) {
+    const name = tc.function?.name;
+    if (name === 'build_chart' || name === 'refuse_off_topic') {
+      toolName = name;
+      try {
+        input = tc.function?.arguments ? JSON.parse(tc.function.arguments) : null;
+      } catch {
+        input = null;
+      }
+      break;
     }
   }
   if (!toolName) return null;
@@ -276,15 +290,14 @@ export async function POST(req: Request) {
 
   let client;
   try {
-    client = getAnthropic();
+    client = getOpenAI();
   } catch (err) {
     if (err instanceof MissingEnvError) {
       return NextResponse.json(
         {
           error: 'env_missing',
           missing: err.missing,
-          message:
-            'Faltan credenciales de Vertex. Configura GOOGLE_CLOUD_PROJECT y GOOGLE_CLOUD_ACCESS_TOKEN en .env.local.',
+          message: 'Configura OPENAI_API_KEY en .env.local.',
         },
         { status: 503 },
       );
@@ -299,22 +312,23 @@ export async function POST(req: Request) {
 
   let response;
   try {
-    response = await client.messages.create({
+    response = await client.chat.completions.create({
       model: getModel(),
       max_tokens: 1024,
-      system: buildSystemPrompt(),
+      messages: [
+        { role: 'system', content: buildSystemPrompt() },
+        { role: 'user', content: userContent },
+      ],
       tools: [buildChartTool, refuseTool],
-      tool_choice: { type: 'any' },
-      messages: [{ role: 'user', content: userContent }],
+      tool_choice: 'required',
     });
   } catch (err: unknown) {
     const status = (err as { status?: number })?.status;
     if (status === 401 || status === 403) {
       return NextResponse.json(
         {
-          error: 'token_expired',
-          message:
-            'Token de Vertex caducado o sin permiso. Renuévalo con `gcloud auth print-access-token`.',
+          error: 'invalid_key',
+          message: 'Clave de OpenAI inválida o sin permiso. Revisa OPENAI_API_KEY.',
         },
         { status: 503 },
       );
@@ -323,26 +337,25 @@ export async function POST(req: Request) {
       return NextResponse.json(
         {
           error: 'quota_exceeded',
-          message:
-            'Sin cuota en Vertex para este modelo. Solicita un aumento en la consola de GCP.',
+          message: 'Sin cuota en OpenAI para este modelo. Revisa tu plan en platform.openai.com.',
         },
         { status: 503 },
       );
     }
     if (status && status >= 500) {
       return NextResponse.json(
-        { error: 'upstream', message: 'Vertex respondió con un error. Reintenta en unos segundos.' },
+        { error: 'upstream', message: 'OpenAI respondió con un error. Reintenta en unos segundos.' },
         { status: 502 },
       );
     }
-    console.error('[ask] vertex error', err);
+    console.error('[ask] openai error', err);
     return NextResponse.json({ error: 'unknown', message: 'Error inesperado.' }, { status: 500 });
   }
 
-  const tool = extractToolCall((response.content ?? []) as ContentBlock[]);
+  const tool = extractToolCall(response.choices?.[0]?.message as OpenAIMessage | undefined);
   if (!tool) {
     return NextResponse.json(
-      { error: 'no_tool_call', message: 'Claude no devolvió una configuración válida. Reformula la pregunta.' },
+      { error: 'no_tool_call', message: 'ChatGPT no devolvió una configuración válida. Reformula la pregunta.' },
       { status: 500 },
     );
   }

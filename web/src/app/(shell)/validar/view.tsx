@@ -1,13 +1,14 @@
 'use client';
 
 import { useMutation, useQuery } from '@tanstack/react-query';
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useMemo, useRef, useState } from 'react';
 import {
   Button, Card, CardHeader, KPI, SectionTitle,
   Skeleton, StatBlock, StatStrip,
 } from '@/components/ui';
 import { AlertTriangle, Sparkles, Upload } from '@/components/icons';
 import { cn, hl, pct, pts } from '@/lib/utils';
+import { useLatestPlan, useSetLatestPlan } from '@/lib/use-latest-plan';
 import type { AnalisisPlan, FilaPlan, Linea, PlanRecomendado, Recomendacion } from '@/types';
 import { CalendarGrid } from './calendar-grid';
 import { CellDrawer } from './cell-drawer';
@@ -31,10 +32,15 @@ async function postFile<T>(url: string, file: File): Promise<T> {
 }
 
 export function ValidarView() {
-  const [analisis, setAnalisis] = useState<AnalisisPlan | null>(null);
-  // Distinguishes "haven't fetched yet" from "fetched, no plan exists"
-  // so we don't flash the dropzone before the rehydration check finishes.
-  const [hydrated, setHydrated] = useState(false);
+  // Shared cache keeps the plan loaded across /validar ⇄ /urgencias navigations,
+  // so once it's been fetched (or just uploaded) the other page sees it instantly.
+  const latest = useLatestPlan();
+  const setLatestPlan = useSetLatestPlan();
+  // Local override so "subir otro plan ↻" can show the dropzone again without
+  // wiping the persisted plan — and so the just-uploaded plan wins over the
+  // (briefly stale) cached one immediately.
+  const [localAnalisis, setLocalAnalisis] = useState<AnalisisPlan | null>(null);
+  const [wantsNewUpload, setWantsNewUpload] = useState(false);
   // All-or-nothing: the optimizer produced ONE holistic plan, so the planner
   // either accepts the whole bundle or doesn't. No per-recommendation selection.
   const [appliedAll, setAppliedAll] = useState(false);
@@ -42,29 +48,16 @@ export function ValidarView() {
   const fileRef = useRef<HTMLInputElement>(null);
   const [drag, setDrag] = useState(false);
 
-  // On mount, rehydrate from the most-recently uploaded plan so the user
-  // sees their work when they come back after visiting /urgencias etc.
-  // /api/planes/latest/full returns the cached AnalisisPlan JSON written by
-  // /api/planes on upload — no optimizer re-run needed.
-  useEffect(() => {
-    let cancelled = false;
-    fetch('/api/planes/latest/full')
-      .then((r) => (r.ok ? r.json() : null))
-      .then((data) => {
-        if (cancelled) return;
-        if (data && !('error' in data)) setAnalisis(data as AnalisisPlan);
-        setHydrated(true);
-      })
-      .catch(() => {
-        if (!cancelled) setHydrated(true);
-      });
-    return () => { cancelled = true; };
-  }, []);
+  const analisis = wantsNewUpload ? null : (localAnalisis ?? latest.data ?? null);
+  const hydrated = !latest.isLoading;
 
   const upload = useMutation({
     mutationFn: (file: File) => postFile<AnalisisPlan>('/api/planes', file),
     onSuccess: (data) => {
-      setAnalisis(data);
+      setLocalAnalisis(data);
+      // Prime the shared cache so /urgencias picks it up without re-fetching.
+      setLatestPlan(data);
+      setWantsNewUpload(false);
       setAppliedAll(false);
       setDrawerFilas(null);
     },
@@ -128,7 +121,7 @@ export function ValidarView() {
           <PlanHero
             analisis={analisis}
             recos={recosData}
-            onReset={() => setAnalisis(null)}
+            onReset={() => { setWantsNewUpload(true); setLocalAnalisis(null); }}
           />
 
           {analisis.meta?.source === 'heuristic_fallback' && (

@@ -8,6 +8,7 @@ import {
 } from '@/components/ui';
 import { AlertTriangle, Siren, Sparkles, Star, X } from '@/components/icons';
 import { cn, hl, pct, pts } from '@/lib/utils';
+import { useLatestPlan, useSetLatestPlan } from '@/lib/use-latest-plan';
 import { RecoCard } from '@/components/reco-card';
 import type { AnalisisPlan, Linea } from '@/types';
 
@@ -32,8 +33,14 @@ interface PriorityInput {
 /* ─────────────────────────── Main view ─────────────────────────── */
 
 export function UrgenciasView() {
+  // Shared cache with /validar: an upload there primes this query, so
+  // arriving here finds the plan already loaded (no Skeleton flash).
+  const latest = useLatestPlan();
+  const setLatestPlan = useSetLatestPlan();
+  // Local `active` is the "before" baseline for an in-flight incident — once
+  // the user starts a flow we don't want the baseline to shift under them, so
+  // we snapshot it from the shared cache and only re-sync between flows.
   const [active, setActive] = useState<AnalisisPlan | null>(null);
-  const [hydrated, setHydrated] = useState(false);
   const [kind, setKind] = useState<IncidentKind | null>(null);
   const [preview, setPreview] = useState<AnalisisPlan | null>(null);
   // Remember the last submitted payload so ImpactView can tell whether the
@@ -41,19 +48,13 @@ export function UrgenciasView() {
   const [lastPayload, setLastPayload] = useState<{ outage?: OutageInput; priorityOf?: PriorityInput } | null>(null);
   const [applied, setApplied] = useState(false);
 
-  // Load the active plan (same source as /validar's rehydration)
+  const hydrated = !latest.isLoading;
+  // Adopt the cached plan as the baseline whenever we're not mid-flow.
   useEffect(() => {
-    let cancelled = false;
-    fetch('/api/planes/latest/full')
-      .then((r) => (r.ok ? r.json() : null))
-      .then((data) => {
-        if (cancelled) return;
-        if (data && !('error' in data)) setActive(data as AnalisisPlan);
-        setHydrated(true);
-      })
-      .catch(() => { if (!cancelled) setHydrated(true); });
-    return () => { cancelled = true; };
-  }, []);
+    if (preview || kind) return;
+    const cached = latest.data ?? null;
+    if (cached?.planId !== active?.planId) setActive(cached);
+  }, [latest.data, preview, kind, active?.planId]);
 
   const submit = useMutation({
     mutationFn: async (payload: { outage?: OutageInput; priorityOf?: PriorityInput }) => {
@@ -88,7 +89,12 @@ export function UrgenciasView() {
       if (!r.ok) throw new Error('apply_failed');
       return r.json();
     },
-    onSuccess: () => { setActive(preview); setApplied(true); },
+    onSuccess: () => {
+      setActive(preview);
+      setApplied(true);
+      // Propagate the post-incident plan to /validar via the shared cache.
+      if (preview) setLatestPlan(preview);
+    },
   });
 
   const resetIncident = () => {
