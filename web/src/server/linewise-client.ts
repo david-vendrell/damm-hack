@@ -171,23 +171,28 @@ async function callHfSpace(
  * numbers from it with permissive regex so small format drift doesn't break.
  * ───────────────────────────────────────────────────────────────────── */
 
-/** Extract factory-wide OEE pXX values from the headline table in summary_md. */
-export function parseHeadlineOee(md: string): { p50?: number; p90?: number } {
-  const p50 = md.match(/Plan actual\s*\|\s*\*\*([\d.]+)\s*%\*\*/);
-  const p90 = md.match(/Plan optimizado\s*\|\s*\*\*([\d.]+)\s*%\*\*/);
+/** Extract factory-wide OEE values from the headline table in summary_md.
+ *  `actual` is the model's baseline prediction for the input plan; `optimizado`
+ *  is what the optimizer projects after applying every swap. The diff is the
+ *  total ganancia attainable.
+ *  Markdown row format: `| **Plan actual** | **47.5%** |` (note the closing **). */
+export function parseHeadlineOee(md: string): { actual?: number; optimizado?: number } {
+  const actual     = md.match(/Plan actual\*\*\s*\|\s*\*\*([\d.]+)\s*%\*\*/);
+  const optimizado = md.match(/Plan optimizado\*\*\s*\|\s*\*\*([\d.]+)\s*%\*\*/);
   return {
-    p50: p50 ? Number(p50[1]) / 100 : undefined,
-    p90: p90 ? Number(p90[1]) / 100 : undefined,
+    actual:     actual     ? Number(actual[1])     / 100 : undefined,
+    optimizado: optimizado ? Number(optimizado[1]) / 100 : undefined,
   };
 }
 
-/** Extract Disp × Rend × Cal from the OEE decomposition table. */
+/** Extract Disp × Rend × Cal from the OEE decomposition table. Same `**...**`
+ *  closing pattern as the headline. */
 export function parseDecomposicion(md: string):
   | { disp: number; rend: number; cal: number }
   | undefined {
-  const disp = md.match(/Disponibilidad\s*\|\s*\*\*([\d.]+)\s*%/);
-  const rend = md.match(/Rendimiento\s*\|\s*\*\*([\d.]+)\s*%/);
-  const cal  = md.match(/Calidad\s*\|\s*\*\*([\d.]+)\s*%/);
+  const disp = md.match(/Disponibilidad\*\*\s*\|\s*\*\*([\d.]+)\s*%/);
+  const rend = md.match(/Rendimiento\*\*\s*\|\s*\*\*([\d.]+)\s*%/);
+  const cal  = md.match(/Calidad\*\*\s*\|\s*\*\*([\d.]+)\s*%/);
   if (!disp || !rend || !cal) return undefined;
   return {
     disp: Number(disp[1]) / 100,

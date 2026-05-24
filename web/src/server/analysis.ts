@@ -458,8 +458,12 @@ export async function analizarPlanConLineWise(
   // 5. Recompute banderas + headline numbers from the augmented rows
   const banderas = { evitar: 0, revisar: 0, procede: 0 };
   for (const f of filasAug) banderas[f.veredicto]++;
-  const oeeP50Plan = headline.p50 ?? base.oeePrevistoPlan;
-  const oeeP90Plan = headline.p90 ?? oeeP50Plan;
+  // `Plan actual` from the markdown = the model's baseline OEE for the input
+  // plan (what we want to show as the prediction). `Plan optimizado` = what
+  // the optimizer projects after applying all its proposed swaps — that's
+  // the upper-bound used for the recomendaciones panel comparator.
+  const oeeBaseline   = headline.actual     ?? base.oeePrevistoPlan;
+  const oeeOptimizado = headline.optimizado ?? oeeBaseline;
 
   // 6. Build the embedded PlanRecomendado from the optimizer's swap_log.
   //    `Plan actual` in summary_md is the model's baseline prediction;
@@ -469,17 +473,19 @@ export async function analizarPlanConLineWise(
   const swapRows = parseSwapTable(lw.swap_tbl);
   const planRecomendado = buildPlanRecomendadoFromSwapLog(
     swapRows,
-    oeeP50Plan,
-    oeeP90Plan,
+    oeeBaseline,
+    oeeOptimizado,
   );
 
   return {
     ...base,
     filas: filasAug,
-    oeePrevistoPlan: round3(oeeP50Plan),
+    oeePrevistoPlan: round3(oeeBaseline),
     banderas,
-    oeeP10Plan: round3(Math.max(0.1, oeeP50Plan - (oeeP90Plan - oeeP50Plan))),
-    oeeP90Plan: round3(oeeP90Plan),
+    // p10/p90 aren't given by /optimize_v3 — heuristic widening for now;
+    // a future iteration could call /predict in parallel for true quantiles.
+    oeeP10Plan: round3(Math.max(0.1, oeeBaseline - 0.10)),
+    oeeP90Plan: round3(Math.min(0.95, oeeOptimizado + 0.05)),
     decomposicion: decomp,
     bloqueosMant: bloqueos,
     totalHl,

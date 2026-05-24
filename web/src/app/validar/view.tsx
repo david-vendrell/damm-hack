@@ -265,44 +265,34 @@ function PlanHero({
         />
       </StatStrip>
 
-      {decomp && (
-        <div className="flex flex-wrap items-baseline gap-3 px-1 text-xs text-ink-3">
-          <span className="eyebrow text-ink-4">Descomposición Damm</span>
-          <span><span className="num font-medium text-ink-2">{pct(decomp.disp, 1)}</span> Disponibilidad</span>
-          <span className="text-ink-4">×</span>
-          <span><span className="num font-medium text-ink-2">{pct(decomp.rend, 1)}</span> Rendimiento</span>
-          <span className="text-ink-4">×</span>
-          <span><span className="num font-medium text-ink-2">{pct(decomp.cal, 1)}</span> Calidad</span>
-          <span className="ml-auto inline-flex items-center gap-1.5 text-ink-4">
-            <Sparkles className="h-3 w-3" strokeWidth={2} />
-            {analisis.meta?.source === 'linewise'
-              ? `Modelo LineWise · ${analisis.meta.via === 'local' ? 'local' : 'HF Space'}`
-              : 'Heurística local'}
-            {analisis.meta?.spaceLatencyMs !== undefined && (
-              <span className="num">· {Math.round(analisis.meta.spaceLatencyMs / 1000)} s</span>
-            )}
-            <button
-              type="button"
-              onClick={onReset}
-              className="ml-2 text-ink-3 transition-colors hover:text-ink"
-            >
-              subir otro plan ↻
-            </button>
-          </span>
-        </div>
-      )}
-
-      {!decomp && (
-        <div className="flex justify-end px-1 text-xs text-ink-3">
+      <div className="flex flex-wrap items-baseline gap-3 px-1 text-xs text-ink-3">
+        {decomp && (
+          <>
+            <span className="eyebrow text-ink-4">Descomposición Damm</span>
+            <span><span className="num font-medium text-ink-2">{pct(decomp.disp, 1)}</span> Disponibilidad</span>
+            <span className="text-ink-4">×</span>
+            <span><span className="num font-medium text-ink-2">{pct(decomp.rend, 1)}</span> Rendimiento</span>
+            <span className="text-ink-4">×</span>
+            <span><span className="num font-medium text-ink-2">{pct(decomp.cal, 1)}</span> Calidad</span>
+          </>
+        )}
+        <span className="ml-auto inline-flex items-center gap-1.5 text-ink-4">
+          <Sparkles className="h-3 w-3" strokeWidth={2} />
+          {analisis.meta?.source === 'linewise'
+            ? `Modelo LineWise · ${analisis.meta.via === 'local' ? 'local' : 'HF Space'}`
+            : 'Heurística local'}
+          {analisis.meta?.spaceLatencyMs !== undefined && (
+            <span className="num">· {Math.round(analisis.meta.spaceLatencyMs / 1000)} s</span>
+          )}
           <button
             type="button"
             onClick={onReset}
-            className="transition-colors hover:text-ink"
+            className="ml-2 text-ink-3 transition-colors hover:text-ink"
           >
             subir otro plan ↻
           </button>
-        </div>
-      )}
+        </span>
+      </div>
     </section>
   );
 }
@@ -328,11 +318,26 @@ function RecomendacionesPanel({
   setApplied: (s: Set<string>) => void;
   oeeOriginal: number;
 }) {
+  // When the optimizer ran, each recomendación's gananciaPts is the per-move
+  // contribution the model evaluated in context. Summing them is an
+  // upper-bound approximation (real moves interact: applying just one may
+  // give slightly less than its stated ganancia). When ALL are applied, we
+  // know the exact projection (oeePlanRecomendado). For partial selection,
+  // we scale proportionally so 0% selected → 0 pts and 100% → oeeMaximo.
+  const totalGananciaSum = useMemo(
+    () => data.recomendaciones.reduce((acc, r) => acc + Math.max(0, r.gananciaPts), 0),
+    [data],
+  );
   const gananciaAplicada = useMemo(() => {
     let sum = 0;
-    for (const r of data.recomendaciones) if (applied.has(r.id)) sum += r.gananciaPts;
-    return Math.min(15, sum * 0.55);
-  }, [applied, data]);
+    for (const r of data.recomendaciones) if (applied.has(r.id)) sum += Math.max(0, r.gananciaPts);
+    if (data.source === 'linewise' && totalGananciaSum > 0) {
+      // Anchor to the optimizer's total projection.
+      const fraction = sum / totalGananciaSum;
+      return fraction * data.gananciaPts;
+    }
+    return Math.min(15, sum * 0.55);   // heuristic-era diminishing returns
+  }, [applied, data, totalGananciaSum]);
 
   const oeeActual = Math.min(0.95, oeeOriginal + gananciaAplicada / 100);
   const oeeMaximo = data.oeePlanRecomendado;
@@ -344,13 +349,31 @@ function RecomendacionesPanel({
     setApplied(next);
   };
 
+  const total = data.recomendaciones.length;
+  const nObligatorias = data.recomendaciones.filter(
+    (r) => r.categoria && ['obligatorio', 'prioritario', 'desplazado', 'realojo'].includes(r.categoria),
+  ).length;
+  const nOpcionales = total - nObligatorias;
+
   return (
     <section>
       <Card>
         <CardHeader
-          eyebrow="Recomendaciones"
-          title="Mejoras propuestas"
-          subtitle="aplica las que quieras; el comparador se actualiza al vuelo"
+          eyebrow="Recomendaciones del optimizador"
+          title={`${total} cambios propuestos`}
+          subtitle={
+            nObligatorias > 0
+              ? `${nObligatorias} obligatorios (slot bloqueado) · ${nOpcionales} opcionales (mejora de OEE). Puedes aceptar uno, varios o todos; el comparador se actualiza al instante.`
+              : `${total} mejoras opcionales. Puedes aceptar uno, varios o todos; el comparador se actualiza al instante.`
+          }
+          action={
+            <span className="inline-flex items-center gap-1.5 rounded-pill border border-hairline bg-cream px-2.5 py-1 text-[11px] text-ink-3">
+              <span className="num font-medium text-ink">{applied.size}</span>
+              <span>de</span>
+              <span className="num font-medium text-ink">{total}</span>
+              <span>seleccionados</span>
+            </span>
+          }
         />
         <div className="grid grid-cols-1 gap-5 px-5 py-5 lg:grid-cols-[1fr_320px]">
           <div className="space-y-3">
