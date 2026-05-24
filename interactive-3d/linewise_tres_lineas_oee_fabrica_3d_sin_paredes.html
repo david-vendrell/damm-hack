@@ -18,6 +18,11 @@ html,body{margin:0;padding:0;background:#05080f;height:100%;overflow:hidden}
 </style>
 <div id="scene-wrap" style="position:fixed;inset:0;width:100vw;height:100vh;overflow:hidden;background:#05080f;font-family:var(--font-sans),system-ui,sans-serif">
   <div id="canvas-holder" style="position:absolute;inset:0"></div>
+  <div id="lw-loading" style="position:absolute;inset:0;display:flex;align-items:center;justify-content:center;flex-direction:column;gap:14px;background:#05080f;color:#e2e8f0;z-index:8;transition:opacity .5s ease">
+    <div style="font-size:13px;letter-spacing:2.5px;color:#cbd5e1;font-weight:500">CARGANDO ASSETS</div>
+    <div style="width:220px;height:3px;background:rgba(148,163,184,0.18);border-radius:2px;overflow:hidden"><div id="lw-loading-bar" style="height:100%;width:0%;background:linear-gradient(90deg,#60a5fa,#a78bfa);transition:width .25s ease"></div></div>
+    <div id="lw-loading-detail" style="font-size:11px;color:#64748b;font-variant-numeric:tabular-nums">0 / 0</div>
+  </div>
 
   <div style="position:absolute;top:16px;left:18px;color:#cbd5e1;pointer-events:none;z-index:3">
     <div style="font-size:16px;font-weight:500;color:#f1f5f9;letter-spacing:.2px">LineWise · El Prat · Líneas de latas</div>
@@ -74,6 +79,12 @@ html,body{margin:0;padding:0;background:#05080f;height:100%;overflow:hidden}
 <script src="https://unpkg.com/three@0.128.0/examples/js/postprocessing/RenderPass.js"></script>
 <script src="https://unpkg.com/three@0.128.0/examples/js/postprocessing/ShaderPass.js"></script>
 <script src="https://unpkg.com/three@0.128.0/examples/js/postprocessing/UnrealBloomPass.js"></script>
+<script src="https://unpkg.com/three@0.128.0/examples/js/math/SimplexNoise.js"></script>
+<script src="https://unpkg.com/three@0.128.0/examples/js/postprocessing/SSAOPass.js"></script>
+<script src="https://unpkg.com/three@0.128.0/examples/js/shaders/SSAOShader.js"></script>
+<script src="https://unpkg.com/three@0.128.0/examples/js/loaders/RGBELoader.js"></script>
+<script src="https://unpkg.com/three@0.128.0/examples/js/loaders/GLTFLoader.js"></script>
+<script src="https://unpkg.com/three@0.128.0/examples/js/objects/Reflector.js"></script>
 <script>
 (function(){
   const P = window.__LINEWISE_PLAN__ || null;
@@ -110,50 +121,135 @@ html,body{margin:0;padding:0;background:#05080f;height:100%;overflow:hidden}
   const camera=new THREE.PerspectiveCamera(48,W()/H(),0.1,400);
   const renderer=new THREE.WebGLRenderer({antialias:true,alpha:false});
   renderer.setClearColor(0x05080f,1);renderer.setPixelRatio(Math.min(devicePixelRatio,2));renderer.setSize(W(),H());
-  renderer.toneMapping=THREE.ACESFilmicToneMapping; renderer.toneMappingExposure=1.12;
+  renderer.toneMapping=THREE.ACESFilmicToneMapping; renderer.toneMappingExposure=1.35;
   renderer.outputEncoding=THREE.sRGBEncoding;
   renderer.shadowMap.enabled=true; renderer.shadowMap.type=THREE.PCFSoftShadowMap;
+  renderer.physicallyCorrectLights=true;
   holder.appendChild(renderer.domElement);
+  scene.background=new THREE.Color(0x14191f); // dark, HDRI used for IBL only
 
-  // Post-processing: bloom + FXAA (graceful fallback if scripts didn't load)
-  let composer=null, bloomPass=null, fxaaPass=null;
+  // Post-processing: SSAO + bloom + FXAA (graceful fallback if scripts didn't load)
+  let composer=null, ssaoPass=null, bloomPass=null, fxaaPass=null;
   if(THREE.EffectComposer && THREE.UnrealBloomPass && THREE.ShaderPass && THREE.FXAAShader){
     composer=new THREE.EffectComposer(renderer);
     composer.addPass(new THREE.RenderPass(scene,camera));
-    bloomPass=new THREE.UnrealBloomPass(new THREE.Vector2(W(),H()),1.0,0.45,0.72);
+    if(THREE.SSAOPass){
+      ssaoPass=new THREE.SSAOPass(scene,camera,W(),H());
+      ssaoPass.kernelRadius=8; ssaoPass.minDistance=0.005; ssaoPass.maxDistance=0.12;
+      composer.addPass(ssaoPass);
+    }
+    bloomPass=new THREE.UnrealBloomPass(new THREE.Vector2(W(),H()),0.35,0.32,0.85);
     composer.addPass(bloomPass);
     fxaaPass=new THREE.ShaderPass(THREE.FXAAShader);
     fxaaPass.material.uniforms.resolution.value.set(1/(W()*renderer.getPixelRatio()),1/(H()*renderer.getPixelRatio()));
     composer.addPass(fxaaPass);
   }
 
-  scene.add(new THREE.HemisphereLight(0xbcd2f5,0x0a1020,0.32));
-  scene.add(new THREE.AmbientLight(0x35507a,0.34));
-  const sun=new THREE.DirectionalLight(0xfff1d4,0.95);sun.position.set(18,30,14);
+  // Key + rim lights; HDRI handles fill via scene.environment (loaded async).
+  const sun=new THREE.DirectionalLight(0xfff1d4,3.4);sun.position.set(18,30,14);
   sun.castShadow=true; sun.shadow.mapSize.set(2048,2048);
   sun.shadow.camera.left=-36; sun.shadow.camera.right=36;
   sun.shadow.camera.top=26; sun.shadow.camera.bottom=-26;
   sun.shadow.camera.near=4; sun.shadow.camera.far=80;
   sun.shadow.bias=-0.0005; sun.shadow.normalBias=0.04;
   scene.add(sun);
-  [[-18,-13],[0,0],[18,13],[-18,13],[18,-13]].forEach(p=>{const pl=new THREE.PointLight(0x6fb2ff,0.28,60);pl.position.set(p[0],14,p[1]);scene.add(pl);});
+  const rim=new THREE.DirectionalLight(0x9ccff5,1.1); rim.position.set(-22,16,-10); scene.add(rim);
+  // Permanent ambient sweetener so dark corners don't crush to black
+  const ambient_fill=new THREE.AmbientLight(0xb0c4dc, 0.6); scene.add(ambient_fill);
+  // Hemisphere light for sky/ground fill
+  scene.add(new THREE.HemisphereLight(0xc7d8e8, 0x35404c, 0.55));
+  const boot_ambient=ambient_fill; // alias so bootScene's existing removal noops
+
+  // Overhead practical lights — paired with the ceiling tubes for plausible illumination
+  for(let i=-3;i<=3;i++){
+    const pl=new THREE.PointLight(0xfff0d8, 4.2, 38, 1.4);
+    pl.position.set(0, 14.6, i*7);
+    scene.add(pl);
+  }
+  // Side fill point-lights along the long walls (cool fill so metals read 3D)
+  [-22, 22].forEach(x=>{
+    for(let z=-18; z<=18; z+=9){
+      const pl=new THREE.PointLight(0xb5d8ff, 1.8, 26, 1.6);
+      pl.position.set(x, 7, z);
+      scene.add(pl);
+    }
+  });
+  // Warm accent spots aimed at each end of the factory floor (depth + mood)
+  function accentSpot(x,z,tx,tz, color, intensity){
+    const s=new THREE.SpotLight(color, intensity, 34, Math.PI*0.38, 0.55, 1.2);
+    s.position.set(x, 10, z); s.target.position.set(tx, 0, tz);
+    scene.add(s); scene.add(s.target);
+  }
+  accentSpot(-30, 0, -14, 0, 0xffb070, 26);   // warm sodium-ish from left
+  accentSpot( 30, 0,  14, 0, 0xffd09a, 22);   // warm fill from right
+  accentSpot(  0, 8, 0, -13, 0xc5e0ff, 16);   // cool-blue accent on L14
+  accentSpot(  0, 8, 0,  13, 0xc5e0ff, 16);   // cool-blue accent on L19
+
+  // ─── Asset loader (HDRI + PBR textures) ───────────────────────────────────
+  const assets={textures:{}, env:null};
+  const manager=new THREE.LoadingManager();
+  const _lbar=document.getElementById('lw-loading-bar');
+  const _ldet=document.getElementById('lw-loading-detail');
+  manager.onProgress=(url,loaded,total)=>{
+    const pct=total?(loaded/total*100):0;
+    if(_lbar)_lbar.style.width=pct.toFixed(1)+'%';
+    if(_ldet)_ldet.textContent=loaded+' / '+total;
+  };
+  manager.onError=(url)=>{console.warn('[lw] asset load failed', url);};
+
+  const ASSET_BASE='assets/';
+  const texLoader=new THREE.TextureLoader(manager);
+  function ldSRGB(p){const t=texLoader.load(ASSET_BASE+p); t.encoding=THREE.sRGBEncoding; t.anisotropy=8; return t;}
+  function ldLinear(p){const t=texLoader.load(ASSET_BASE+p); t.anisotropy=8; return t;}
+
+  assets.textures.concrete={
+    map:        ldSRGB ('textures/concrete_floor/concrete_floor_03_diff_1k.jpg'),
+    normalMap:  ldLinear('textures/concrete_floor/concrete_floor_03_nor_gl_1k.jpg'),
+    roughnessMap:ldLinear('textures/concrete_floor/concrete_floor_03_rough_1k.jpg'),
+    aoMap:      ldLinear('textures/concrete_floor/concrete_floor_03_ao_1k.jpg'),
+  };
+  assets.textures.painted={
+    map:        ldSRGB ('textures/painted_metal/painted_metal_shutter_diff_1k.jpg'),
+    normalMap:  ldLinear('textures/painted_metal/painted_metal_shutter_nor_gl_1k.jpg'),
+    roughnessMap:ldLinear('textures/painted_metal/painted_metal_shutter_rough_1k.jpg'),
+  };
+  assets.textures.steel={
+    map:        ldSRGB ('textures/brushed_steel/metal_plate_diff_1k.jpg'),
+    normalMap:  ldLinear('textures/brushed_steel/metal_plate_nor_gl_1k.jpg'),
+    roughnessMap:ldLinear('textures/brushed_steel/metal_plate_rough_1k.jpg'),
+  };
+
+  if(THREE.RGBELoader){
+    new THREE.RGBELoader(manager).load(ASSET_BASE+'hdri/industrial_workshop_foundry_2k.hdr', tex=>{
+      const pmrem=new THREE.PMREMGenerator(renderer); pmrem.compileEquirectangularShader();
+      const envMap=pmrem.fromEquirectangular(tex).texture;
+      scene.environment=envMap;
+      assets.env=envMap;
+      tex.dispose(); pmrem.dispose();
+    });
+  }
 
   function box(w,h,d,m){return new THREE.Mesh(new THREE.BoxGeometry(w,h,d),m);}
   function cyl(a,b,h,m,s){return new THREE.Mesh(new THREE.CylinderGeometry(a,b,h,s||20),m);}
-  const mBody=new THREE.MeshStandardMaterial({color:0x9aa7b7,metalness:0.55,roughness:0.42});
-  const mDark=new THREE.MeshStandardMaterial({color:0x515d6e,metalness:0.6,roughness:0.5});
-  const mSteel=new THREE.MeshStandardMaterial({color:0xc4cedb,metalness:0.7,roughness:0.3});
-  const mBlue=new THREE.MeshStandardMaterial({color:0x2563eb,metalness:0.35,roughness:0.4,emissive:0x1e40af,emissiveIntensity:0.25});
+  const mBody=new THREE.MeshStandardMaterial({color:0xc0c8d2,metalness:0.55,roughness:0.55});
+  const mDark=new THREE.MeshStandardMaterial({color:0x3e4654,metalness:0.55,roughness:0.55,envMapIntensity:0.7});
+  const mSteel=new THREE.MeshStandardMaterial({color:0xd6dde6,metalness:0.92,roughness:0.22});
+  const mBlue=new THREE.MeshStandardMaterial({color:0x3b4a6b,metalness:0.55,roughness:0.45});
   const mBelt=new THREE.MeshStandardMaterial({color:0x141c29,metalness:0.2,roughness:0.85});
-  const mGlass=new THREE.MeshStandardMaterial({color:0x223247,metalness:0.3,roughness:0.2,transparent:true,opacity:0.55});
+  const mGlass = new THREE.MeshStandardMaterial({color:0xb8d5ea,metalness:0.3,roughness:0.08,transparent:true,opacity:0.55});
 
   const SHX=64,SHZ=46;
-  const floorMat=new THREE.MeshStandardMaterial({color:0x47505e,metalness:0.1,roughness:0.92});
+  const floorMat=new THREE.MeshStandardMaterial({color:0x4a5260,metalness:0.05,roughness:0.85});
   const floor=new THREE.Mesh(new THREE.PlaneGeometry(SHX,SHZ),floorMat);floor.rotation.x=-Math.PI/2;floor.receiveShadow=true;scene.add(floor);
-  for(let i=-2;i<=2;i++){const lane=box(SHX,0.02,0.18,new THREE.MeshStandardMaterial({color:0xf2c200,roughness:0.7,emissive:0x3a2c00,emissiveIntensity:0.3}));lane.position.set(0,0.02,i*6.5+ (i>0?2.5:i<0?-2.5:0));scene.add(lane);}
-  const beamMat=new THREE.MeshStandardMaterial({color:0x2c3a4d,metalness:0.6,roughness:0.5});
+  // Floor overlay swapped in by onLoad to use PBR + reflector
+  for(let i=-2;i<=2;i++){const lane=box(SHX,0.02,0.18,new THREE.MeshStandardMaterial({color:0xb89800,roughness:0.75,metalness:0.05}));lane.position.set(0,0.022,i*6.5+ (i>0?2.5:i<0?-2.5:0));lane.receiveShadow=true;scene.add(lane);}
+  const beamMat=new THREE.MeshStandardMaterial({color:0x2c3a4d,metalness:0.6,roughness:0.55});
   for(let i=-3;i<=3;i++){const tr=box(SHX,0.5,0.5,beamMat);tr.position.set(0,15.6,i*7);scene.add(tr);}
-  for(let i=-3;i<=3;i++){const lt=box(8,0.25,0.6,new THREE.MeshStandardMaterial({color:0xffffff,emissive:0xbfe0ff,emissiveIntensity:0.9}));lt.position.set(0,15.2,i*7);scene.add(lt);}
+  // Ceiling tube lights: subtle emissive, with a paired RectAreaLight for plausible illumination
+  for(let i=-3;i<=3;i++){
+    const lt=box(8,0.18,0.5,new THREE.MeshStandardMaterial({color:0xffffff,emissive:0xfff8e8,emissiveIntensity:1.4,roughness:0.5}));
+    lt.position.set(0,15.2,i*7);scene.add(lt);
+  }
 
   function tanks(){const g=new THREE.Group();const b=box(4,0.3,2.2,mDark);b.position.y=0.15;g.add(b);for(let i=-1;i<=1;i++){const t=cyl(0.7,0.7,3,mSteel);t.position.set(i*1.2,1.7,0);g.add(t);const c=new THREE.Mesh(new THREE.SphereGeometry(0.7,16,10,0,6.3,0,1.57),mSteel);c.position.set(i*1.2,3.2,0);g.add(c);}g.userData={w:4.4,d:2.4,top:3.6};return g;}
   function rinser(){const g=new THREE.Group();const c=box(1.7,1.8,1.5,mBody);c.position.y=0.9;g.add(c);const sw=cyl(0.7,0.7,0.25,mSteel);sw.position.y=1.95;g.add(sw);const p=box(0.5,0.7,0.05,mGlass);p.position.set(0,1,0.78);g.add(p);g.userData={w:2,d:1.7,top:2.1};return g;}
@@ -310,34 +406,40 @@ html,body{margin:0;padding:0;background:#05080f;height:100%;overflow:hidden}
       stationByLine[L.id][st.key]=sObj;
     });
     const blen=(STAGES.length-1)*DX;
-    // animated belt (per-line cloned texture so offset advances independently)
+    // dark rubber belt (per-line cloned texture so offset advances independently)
     const beltTex=beltBaseTex.clone(); beltTex.needsUpdate=true;
     beltTex.wrapS=beltTex.wrapT=THREE.RepeatWrapping;
     beltTex.repeat.set(blen/1.4, 1);
-    const beltMatL=new THREE.MeshStandardMaterial({map:beltTex,color:0x2a3a55,metalness:0.25,roughness:0.78});
-    const belt=box(blen,0.25,1.4,beltMatL);belt.position.set(X0+blen/2,0.45,L.z);belt.receiveShadow=true;scene.add(belt);
+    const beltMatL=new THREE.MeshStandardMaterial({map:beltTex,color:0x1a2030,metalness:0.15,roughness:0.85});
+    const belt=box(blen,0.25,1.4,beltMatL);belt.position.set(X0+blen/2,0.45,L.z);belt.receiveShadow=true;belt.castShadow=true;scene.add(belt);
     beltMat[L.id]=beltMatL;
-    // glowing "tron" edge rails
+    // painted-metal guide rails (no glow)
     for(const sgn of[-1,1]){
-      const railMat=new THREE.MeshStandardMaterial({color:0x60a5fa,emissive:0x2563eb,emissiveIntensity:1.4,metalness:0.4,roughness:0.35});
-      const rail=box(blen,0.06,0.06,railMat);rail.position.set(X0+blen/2,0.66,L.z+sgn*0.72);scene.add(rail);
+      const railMat=new THREE.MeshStandardMaterial({color:0x9ca3af,metalness:0.85,roughness:0.35});
+      const rail=box(blen,0.08,0.08,railMat);rail.position.set(X0+blen/2,0.66,L.z+sgn*0.72);rail.castShadow=true;rail.receiveShadow=true;scene.add(rail);
     }
-    // brand-color floor stripe (the signature visual)
-    const glowMat=new THREE.MeshBasicMaterial({color:0x6b7280,transparent:true,opacity:0.08,blending:THREE.AdditiveBlending,depthWrite:false});
-    const glow=new THREE.Mesh(new THREE.PlaneGeometry(blen+4, 2.6), glowMat);
-    glow.rotation.x=-Math.PI/2; glow.position.set(X0+blen/2, 0.018, L.z);
-    scene.add(glow); lineGlow[L.id]={mesh:glow,mat:glowMat,activeColor:new THREE.Color(0x6b7280),isActive:false};
+    // Small per-line LED indicator (subtle brand cue, picked up by bloom)
+    const ledMat=new THREE.MeshStandardMaterial({color:0x6b7280,emissive:0x6b7280,emissiveIntensity:0.0,metalness:0,roughness:0.4});
+    const led=new THREE.Mesh(new THREE.SphereGeometry(0.18,12,10), ledMat);
+    led.position.set(X0+blen+1.6, 1.2, L.z);
+    scene.add(led); lineGlow[L.id]={led:led,ledMat:ledMat,activeColor:new THREE.Color(0x6b7280),isActive:false};
+    // Physical nameplate sign at line start (replaces floating sprite).
+    // Reuses the texture from the label sprite's CanvasTexture so repaints
+    // automatically update both.
     const lineLbl=makeLineLabel(L.id);
-    lineLbl.sprite.position.set(X0-3.4,3.6,L.z);
-    scene.add(lineLbl.sprite);
-    lineLabels[L.id]=lineLbl;
+    const npGeom=new THREE.PlaneGeometry(3.2, 1.2);
+    const npMat=new THREE.MeshBasicMaterial({map:lineLbl.sprite.material.map, transparent:true, side:THREE.DoubleSide});
+    const np=new THREE.Mesh(npGeom, npMat);
+    np.position.set(X0-2.8, 2.4, L.z); np.rotation.y=Math.PI*0.5;
+    scene.add(np);
+    lineLabels[L.id]=lineLbl; // sprite reference kept so .repaint() is callable
   });
   const L_total=(STAGES.length-1)*DX;
 
   // ─── Particle systems: steam + changeover sparks (per line) ──────────────
   const steamSystems={}, sparkSystems={};
   LINES.forEach(L=>{
-    const N=42;
+    const N=24;
     const positions=new Float32Array(N*3), colors=new Float32Array(N*3);
     const vel=[],age=[],maxAge=[],spawnPos=[];
     const filler=stationByLine[L.id]['fill']||{x:0,top:2.6};
@@ -360,7 +462,7 @@ html,body{margin:0;padding:0;background:#05080f;height:100%;overflow:hidden}
     const geo=new THREE.BufferGeometry();
     geo.setAttribute('position', new THREE.BufferAttribute(positions,3));
     geo.setAttribute('color',    new THREE.BufferAttribute(colors,3));
-    const mat=new THREE.PointsMaterial({size:1.05, map:steamTex, vertexColors:true, transparent:true, blending:THREE.AdditiveBlending, depthWrite:false, sizeAttenuation:true});
+    const mat=new THREE.PointsMaterial({size:1.4, map:steamTex, vertexColors:true, transparent:true, blending:THREE.AdditiveBlending, depthWrite:false, sizeAttenuation:true});
     const pts=new THREE.Points(geo, mat); scene.add(pts);
     steamSystems[L.id]={pts,positions,colors,vel,age,maxAge,spawnPos,N};
 
@@ -378,7 +480,7 @@ html,body{margin:0;padding:0;background:#05080f;height:100%;overflow:hidden}
 
   function spawnSparks(lineKey, sx, sz, sy){
     const sys=sparkSystems[lineKey]; if(!sys)return;
-    for(let k=0;k<48;k++){
+    for(let k=0;k<28;k++){
       const i=sys.nextIdx; sys.nextIdx=(sys.nextIdx+1)%sys.N;
       sys.positions[i*3]=sx+(Math.random()-0.5)*0.3;
       sys.positions[i*3+1]=sy||0.6;
@@ -386,7 +488,7 @@ html,body{margin:0;padding:0;background:#05080f;height:100%;overflow:hidden}
       const a=Math.random()*Math.PI*2, r=0.6+Math.random()*0.9;
       sys.vel[i]={x:Math.cos(a)*r, y:1.3+Math.random()*1.1, z:Math.sin(a)*r};
       sys.age[i]=0;
-      sys.colors[i*3]=1; sys.colors[i*3+1]=0.95; sys.colors[i*3+2]=0.3;
+      sys.colors[i*3]=1; sys.colors[i*3+1]=0.96; sys.colors[i*3+2]=0.77;
     }
     sys.pts.geometry.attributes.position.needsUpdate=true;
     sys.pts.geometry.attributes.color.needsUpdate=true;
@@ -429,19 +531,87 @@ html,body{margin:0;padding:0;background:#05080f;height:100%;overflow:hidden}
   // ─── Cans + workers + forklift ────────────────────────────────────────────
   // Per-line can-top material so each line shows its active brand color.
   const cans=[];const NC=14;
-  const cb=new THREE.MeshStandardMaterial({color:0xd6dde4,metalness:0.65,roughness:0.3});
-  const canTopMat={};
-  LINES.forEach(L=>{canTopMat[L.id]=new THREE.MeshStandardMaterial({color:0x2563eb,emissive:0x2563eb,emissiveIntensity:0.65,metalness:0.4,roughness:0.4,transparent:true,opacity:1});});
-  const lineSpeedMult={L14:1,L17:1,L19:1};
-  function setLineCanColor(lineKey,hex,opacity){
-    const m=canTopMat[lineKey]; if(!m)return;
-    m.color.setStyle(hex);
-    if(opacity>=0.999){ m.emissive.setStyle(hex); m.emissiveIntensity=0.75; }
-    else { m.emissive.setHex(0x000000); m.emissiveIntensity=0; }
-    m.opacity=opacity; m.transparent=opacity<0.999;
-    m.needsUpdate=true;
+  // Brushed aluminium top + bottom, brand-color body wrap from a per-line CanvasTexture
+  const canTopMatBase=new THREE.MeshStandardMaterial({color:0xd6dde4,metalness:0.95,roughness:0.28});
+  const canBottomMat=new THREE.MeshStandardMaterial({color:0x8b939c,metalness:0.9,roughness:0.42});
+  const canBodyMat={}, canLabelTex={}, canLabelCanvas={};
+
+  function makeCanLabelTexture(){
+    const cv=document.createElement('canvas'); cv.width=512; cv.height=256;
+    const t=new THREE.CanvasTexture(cv);
+    t.encoding=THREE.sRGBEncoding;
+    t.wrapS=t.wrapT=THREE.ClampToEdgeWrapping;
+    return {canvas:cv, tex:t};
   }
-  LINES.forEach(L=>{for(let i=0;i<NC;i++){const c=new THREE.Group();const b=cyl(0.16,0.16,0.4,cb,12);b.castShadow=true;c.add(b);const t=cyl(0.16,0.16,0.05,canTopMat[L.id],12);t.position.y=0.22;c.add(t);c.position.set(X0+i/NC*L_total,0.85,L.z);c.userData={d:i/NC*L_total,z:L.z,lineKey:L.id};scene.add(c);cans.push(c);}});
+  function paintCanLabel(canvas, tex, hex, sku, isIdle){
+    const x=canvas.getContext('2d');
+    x.clearRect(0,0,canvas.width,canvas.height);
+    if(isIdle){
+      // dim grey, no label — pausa state
+      x.fillStyle='#6b7280'; x.fillRect(0,0,canvas.width,canvas.height);
+      x.fillStyle='rgba(255,255,255,0.06)';
+      for(let i=0;i<canvas.width;i+=16){x.fillRect(i,0,1,canvas.height);}
+    } else {
+      // body fill with subtle vertical highlight band
+      x.fillStyle=hex||'#3b82f6'; x.fillRect(0,0,canvas.width,canvas.height);
+      const grad=x.createLinearGradient(0,0,0,canvas.height);
+      grad.addColorStop(0,'rgba(255,255,255,0.18)');
+      grad.addColorStop(0.4,'rgba(255,255,255,0.06)');
+      grad.addColorStop(0.6,'rgba(0,0,0,0.0)');
+      grad.addColorStop(1,'rgba(0,0,0,0.35)');
+      x.fillStyle=grad; x.fillRect(0,0,canvas.width,canvas.height);
+      // SKU code, large, centered
+      x.fillStyle='rgba(255,255,255,0.95)';
+      x.font='700 64px sans-serif';
+      x.textAlign='center'; x.textBaseline='middle';
+      x.fillText((sku||'DAMM').slice(0,10), canvas.width/2, canvas.height/2);
+      // top + bottom dark band for rim shadow
+      x.fillStyle='rgba(0,0,0,0.45)';
+      x.fillRect(0,0,canvas.width,12);
+      x.fillRect(0,canvas.height-18,canvas.width,18);
+    }
+    tex.needsUpdate=true;
+  }
+
+  LINES.forEach(L=>{
+    const {canvas,tex}=makeCanLabelTexture();
+    canLabelCanvas[L.id]=canvas; canLabelTex[L.id]=tex;
+    paintCanLabel(canvas, tex, '#6b7280', null, true);
+    canBodyMat[L.id]=new THREE.MeshStandardMaterial({map:tex, metalness:0.55, roughness:0.5});
+  });
+  const lineSpeedMult={L14:1,L17:1,L19:1};
+  const _lastLabelKey={};
+  function setLineCanColor(lineKey,hex,opacity,sku){
+    const idle=(opacity<0.999);
+    const key=(idle?'idle':'a')+'|'+(hex||'')+'|'+(sku||'');
+    if(_lastLabelKey[lineKey]===key)return;
+    _lastLabelKey[lineKey]=key;
+    paintCanLabel(canLabelCanvas[lineKey], canLabelTex[lineKey], hex, sku, idle);
+  }
+
+  // Build per-line cans with a slightly tapered cylinder + flat top + bottom
+  LINES.forEach(L=>{
+    for(let i=0;i<NC;i++){
+      const c=new THREE.Group();
+      // Body: tapered cylinder (slight neck-in at top)
+      const bodyGeo=new THREE.CylinderGeometry(0.155, 0.16, 0.42, 18, 1, false);
+      const body=new THREE.Mesh(bodyGeo, canBodyMat[L.id]);
+      body.castShadow=true; body.receiveShadow=true;
+      c.add(body);
+      // Brushed top recess
+      const top=new THREE.Mesh(new THREE.CylinderGeometry(0.145, 0.155, 0.04, 18), canTopMatBase);
+      top.position.y=0.22; top.castShadow=true; c.add(top);
+      // Tiny lip
+      const lip=new THREE.Mesh(new THREE.TorusGeometry(0.155, 0.012, 6, 18), canTopMatBase);
+      lip.rotation.x=Math.PI/2; lip.position.y=0.21; c.add(lip);
+      // Bottom recess
+      const bot=new THREE.Mesh(new THREE.CylinderGeometry(0.15, 0.155, 0.025, 18), canBottomMat);
+      bot.position.y=-0.21; c.add(bot);
+      c.position.set(X0+i/NC*L_total, 0.86, L.z);
+      c.userData={d:i/NC*L_total, z:L.z, lineKey:L.id};
+      scene.add(c); cans.push(c);
+    }
+  });
 
   const workers=[];const skin=new THREE.MeshStandardMaterial({color:0xd9a87f,roughness:0.8});const vest=new THREE.MeshStandardMaterial({color:0xff7a18,emissive:0x7a3300,emissiveIntensity:0.3,roughness:0.7});const helmet=new THREE.MeshStandardMaterial({color:0xf2c200,roughness:0.5});const dk=new THREE.MeshStandardMaterial({color:0x2a3340,roughness:0.8});
   function worker(){const g=new THREE.Group();const legs=box(0.42,0.7,0.3,dk);legs.position.y=0.35;g.add(legs);const torso=box(0.5,0.65,0.32,vest);torso.position.y=1.0;g.add(torso);const head=new THREE.Mesh(new THREE.SphereGeometry(0.17,12,10),skin);head.position.y=1.48;g.add(head);const hel=new THREE.Mesh(new THREE.SphereGeometry(0.19,12,8,0,6.3,0,1.7),helmet);hel.position.y=1.5;g.add(hel);const la=box(0.12,0.55,0.12,vest);la.position.set(-0.31,1.05,0);g.add(la);const ra=la.clone();ra.position.x=0.31;g.add(ra);g.userData={la,ra,legs};return g;}
@@ -701,7 +871,7 @@ html,body{margin:0;padding:0;background:#05080f;height:100%;overflow:hidden}
       const blk=activeBlock(blocks,playhead);
       if(blk){
         setLineOEE(L.id,blk.oee);
-        setLineCanColor(L.id,blk.brandColor,1.0);
+        setLineCanColor(L.id,blk.brandColor,1.0,blk.sku);
         lineSpeedMult[L.id]=0.4+blk.oee*1.0;
         lineLabels[L.id]&&lineLabels[L.id].repaint(blk.sku,blk.format,blk.brandColor,false);
         if(lineGlow[L.id]){
@@ -993,12 +1163,13 @@ html,body{margin:0;padding:0;background:#05080f;height:100%;overflow:hidden}
     });
     Object.keys(beltMat).forEach(lk=>{const t=beltMat[lk].map; if(t){t.offset.x-=0.006*(lineSpeedMult[lk]||0)*slowmoFactor;}});
 
-    // brand floor stripe: lerp + pulse
+    // per-line LED indicator (subtle brand cue, picked up by bloom)
     Object.keys(lineGlow).forEach(lk=>{
       const lg=lineGlow[lk];
-      lg.mat.color.lerp(lg.activeColor, 0.08);
-      if(lg.isActive){lg.mat.opacity=0.42+0.13*Math.sin(tm*1.8 + (lk==='L14'?0:lk==='L17'?2.1:4.2));}
-      else {lg.mat.opacity=0.08;}
+      lg.ledMat.color.lerp(lg.activeColor, 0.08);
+      lg.ledMat.emissive.lerp(lg.activeColor, 0.08);
+      if(lg.isActive){lg.ledMat.emissiveIntensity=2.4 + 1.0*Math.sin(tm*1.8 + (lk==='L14'?0:lk==='L17'?2.1:4.2));}
+      else {lg.ledMat.emissiveIntensity=0.05;}
     });
 
     // pad pulsing + per-station changeover flash overlay
@@ -1063,7 +1234,7 @@ html,body{margin:0;padding:0;background:#05080f;height:100%;overflow:hidden}
         sys.positions[i*3+2]+=sys.vel[i].z*dt;
         sys.vel[i].y-=4.2*dt;
         const fade=Math.max(0,1-sys.age[i]/sys.maxAge);
-        sys.colors[i*3]=fade; sys.colors[i*3+1]=0.92*fade; sys.colors[i*3+2]=0.3*fade;
+        sys.colors[i*3]=fade; sys.colors[i*3+1]=0.96*fade; sys.colors[i*3+2]=0.77*fade;
       }
       sys.pts.geometry.attributes.position.needsUpdate=true;
       sys.pts.geometry.attributes.color.needsUpdate=true;
@@ -1100,11 +1271,83 @@ html,body{margin:0;padding:0;background:#05080f;height:100%;overflow:hidden}
 
     if(composer)composer.render(); else renderer.render(scene,camera);
   }
-  loop();
+  // ─── Asset bootstrap: patch materials with PBR maps, swap reflective floor ─
+  function applyTilingTex(t, repX, repY){
+    if(!t)return;
+    t.wrapS=t.wrapT=THREE.RepeatWrapping;
+    t.repeat.set(repX, repY||repX);
+  }
+  function bootScene(){
+    try {
+      // remove the temporary boot ambient — HDRI + key + rim now carry the scene
+      scene.remove(boot_ambient);
+
+      // mBody (painted machinery)
+      const pm=assets.textures.painted;
+      if(pm.map){
+        applyTilingTex(pm.map, 1.4); applyTilingTex(pm.normalMap, 1.4); applyTilingTex(pm.roughnessMap, 1.4);
+        mBody.map=pm.map; mBody.normalMap=pm.normalMap; mBody.roughnessMap=pm.roughnessMap;
+        mBody.needsUpdate=true;
+      }
+      // mSteel (brushed steel)
+      const st=assets.textures.steel;
+      if(st.map){
+        applyTilingTex(st.map, 1.0); applyTilingTex(st.normalMap, 1.0); applyTilingTex(st.roughnessMap, 1.0);
+        mSteel.map=st.map; mSteel.normalMap=st.normalMap; mSteel.roughnessMap=st.roughnessMap;
+        mSteel.needsUpdate=true;
+      }
+      // Plain textured concrete floor (no reflector)
+      const cf=assets.textures.concrete;
+      if(cf.map){
+        applyTilingTex(cf.map, 10, 7);
+        applyTilingTex(cf.normalMap, 10, 7);
+        applyTilingTex(cf.roughnessMap, 10, 7);
+        applyTilingTex(cf.aoMap, 10, 7);
+        // floor PlaneGeometry needs uv2 for the AO map
+        if(floor.geometry && floor.geometry.attributes.uv && !floor.geometry.attributes.uv2){
+          floor.geometry.setAttribute('uv2', new THREE.BufferAttribute(floor.geometry.attributes.uv.array, 2));
+        }
+        floor.material.map=cf.map;
+        floor.material.normalMap=cf.normalMap;
+        floor.material.roughnessMap=cf.roughnessMap;
+        floor.material.aoMap=cf.aoMap;
+        // Reset tint so the diffuse map shows true luminance (was 0x4a5260 — darkened it)
+        floor.material.color.setHex(0xffffff);
+        floor.material.aoMapIntensity=0.7;
+        floor.material.needsUpdate=true;
+      }
+      // Boost env intensity broadly so HDRI fills the scene; metals get more
+      scene.traverse(n=>{
+        if(n.isMesh && n.material && 'envMapIntensity' in n.material){
+          n.material.envMapIntensity = (n.material.metalness||0) >= 0.5 ? 1.8 : 1.3;
+        }
+      });
+      // Fade out the loading overlay
+      const ovl=document.getElementById('lw-loading');
+      if(ovl){ ovl.style.opacity='0'; setTimeout(()=>{ovl.style.display='none';}, 550); }
+    } catch(e){
+      console.warn('[lw] bootScene patch failed', e);
+    }
+    loop();
+  }
+
+  // _bootArmed is set true once bootScene is reachable; safeBoot called from
+  // multiple places (onLoad, fallback timer, or immediately if all assets already done).
+  let _booted=false;
+  window.__lwSafeBoot=function safeBoot(){if(_booted)return; _booted=true; bootScene();};
+  // Replace the earlier onLoad attachment with one that knows about bootScene.
+  manager.onLoad=window.__lwSafeBoot;
+  // If everything already loaded before we got here (LoadingManager misses the
+  // event if onLoad wasn't set at the time itemsLoaded reached itemsTotal):
+  if(manager.isLoading===false){ window.__lwSafeBoot(); }
+  // Fall back after 4s for any other edge case
+  setTimeout(()=>{ if(!_booted){console.warn('[lw] asset loader timeout — booting with defaults'); window.__lwSafeBoot();} }, 4000);
+
   window.addEventListener('resize',()=>{
     camera.aspect=W()/H();camera.updateProjectionMatrix();renderer.setSize(W(),H());
     if(composer)composer.setSize(W(),H());
     if(bloomPass)bloomPass.setSize(W(),H());
+    if(ssaoPass)ssaoPass.setSize(W(),H());
     if(fxaaPass)fxaaPass.material.uniforms.resolution.value.set(1/(W()*renderer.getPixelRatio()),1/(H()*renderer.getPixelRatio()));
   });
 })();
