@@ -3,8 +3,8 @@
 import { useMutation, useQuery } from '@tanstack/react-query';
 import { useMemo, useRef, useState } from 'react';
 import {
-  Button, Card, CardHeader, KPI, Pill, SectionTitle,
-  Skeleton, StatBlock, StatStrip, VeredictoBadge,
+  Button, Card, CardHeader, KPI, SectionTitle,
+  Skeleton, StatBlock, StatStrip,
 } from '@/components/ui';
 import { AlertTriangle, Sparkles, Upload } from '@/components/icons';
 import { cn, hl, pct, pts } from '@/lib/utils';
@@ -142,13 +142,6 @@ export function ValidarView() {
             />
           )}
 
-          {/* Tabla — drill-down */}
-          <section aria-label="Detalle por OF">
-            <SectionTitle eyebrow="Drill-down" subtitle="Lista completa de OFs ordenada por línea y secuencia.">
-              Detalle por OF
-            </SectionTitle>
-            <TablaOFs analisis={analisis} />
-          </section>
         </>
       )}
 
@@ -223,17 +216,9 @@ function UploadDropzone({
 function PendingState() {
   return (
     <div className="space-y-3">
-      <div className="rounded-card border border-hairline bg-cream/40 px-5 py-4 text-xs text-ink-3">
-        <div className="flex items-center gap-2">
-          <Sparkles className="h-3.5 w-3.5 text-damm" strokeWidth={2} />
-          <span className="font-medium text-ink-2">Procesando con LineWise…</span>
-        </div>
-        <p className="mt-1.5 text-[11px] text-ink-3">
-          Se está corriendo el optimizador V3 sobre el plan: parser → features
-          (cascade-aware lookup ~7&nbsp;000 entries) → predicción de OEE por OF
-          con LightGBM quantile (los mismos 12 modelos del juego de pruebas) →
-          local search de movimientos. **Tardará entre 5 y 15 segundos.**
-        </p>
+      <div className="flex items-center gap-2 px-1 text-xs text-ink-3">
+        <Sparkles className="h-3.5 w-3.5 text-damm animate-pulse" strokeWidth={2} />
+        <span>Procesando con LineWise · 5–15 s</span>
       </div>
       <Skeleton className="h-24 w-full" />
       <Skeleton className="h-80 w-full" />
@@ -484,74 +469,3 @@ function SecuenciaLinea({ label, skus, highlight }: { label: string; skus: strin
   );
 }
 
-/* ─────────────────────────── Tabla detalle ─────────────────────────── */
-
-function TablaOFs({ analisis }: { analisis: AnalisisPlan }) {
-  const [filtroLinea, setFiltroLinea] = useState<Linea | null>(null);
-  const filtradas = useMemo(
-    () => (filtroLinea ? analisis.filas.filter((f) => f.linea === filtroLinea) : analisis.filas),
-    [analisis, filtroLinea],
-  );
-
-  return (
-    <Card>
-      <CardHeader
-        title="Órdenes de fabricación del plan"
-        subtitle={`${analisis.filas.length} OFs · OEE previsto medio ${pct(analisis.oeePrevistoPlan, 1)}`}
-        action={
-          <div className="flex gap-1.5">
-            <Pill active={filtroLinea === null} onClick={() => setFiltroLinea(null)}>Todas</Pill>
-            {[14, 17, 19].map((l) => (
-              <Pill key={l} active={filtroLinea === l} onClick={() => setFiltroLinea(l as Linea)}>
-                L{l}
-              </Pill>
-            ))}
-          </div>
-        }
-      />
-      <div className="overflow-x-auto">
-        <table className="w-full text-sm">
-          <thead>
-            <tr className="border-b border-hairline text-left">
-              <th className="eyebrow px-5 py-3 text-ink-3">Veredicto</th>
-              <th className="eyebrow px-5 py-3 text-ink-3">Línea</th>
-              <th className="eyebrow px-5 py-3 text-ink-3">Día</th>
-              <th className="eyebrow px-5 py-3 text-ink-3">SKU</th>
-              <th className="eyebrow px-5 py-3 text-right text-ink-3">Hl</th>
-              <th className="eyebrow px-5 py-3 text-ink-3">Cambio</th>
-              <th className="eyebrow px-5 py-3 text-right text-ink-3">OEE p50</th>
-              <th className="eyebrow px-5 py-3 text-right text-ink-3">p90</th>
-              <th className="eyebrow px-5 py-3 text-ink-3">Motivo</th>
-            </tr>
-          </thead>
-          <tbody>
-            {filtradas.map((f, i) => (
-              <tr key={i} className="border-b border-hairline last:border-0 transition-colors hover:bg-cream/40">
-                <td className="px-5 py-3"><VeredictoBadge v={f.veredicto} /></td>
-                <td className="num px-5 py-3 text-ink-2">L{f.linea}</td>
-                <td className="num px-5 py-3 text-xs text-ink-3">{f.dia}</td>
-                <td className="px-5 py-3">
-                  <div className="text-sm font-medium text-ink">{f.nombre}</div>
-                  <div className="font-mono text-xs text-ink-3">{f.sku}</div>
-                </td>
-                <td className="num px-5 py-3 text-right text-ink-2">{hl(f.hlPlan)}</td>
-                <td className="px-5 py-3 text-xs">
-                  {f.tipoCambio === 'inicio' && <span className="text-ink-4">— inicio —</span>}
-                  {f.tipoCambio === 'formato' && <span className="font-medium text-damm-700">cambio de formato</span>}
-                  {f.tipoCambio === 'cerveza' && <span className="text-ink-3">cambio de cerveza</span>}
-                  {f.tipoCambio === 'mantenimiento' && <span className="text-gold-700">mantenimiento</span>}
-                  {f.tipoCambio === 'otro' && <span className="text-ink-4">—</span>}
-                </td>
-                <td className="num px-5 py-3 text-right font-medium text-ink">{pct(f.oeePrevisto, 1)}</td>
-                <td className="num px-5 py-3 text-right text-ink-3">
-                  {f.oeeP90 !== undefined ? pct(f.oeeP90, 1) : '—'}
-                </td>
-                <td className="px-5 py-3 text-xs text-ink-3">{f.motivo}</td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-      </div>
-    </Card>
-  );
-}

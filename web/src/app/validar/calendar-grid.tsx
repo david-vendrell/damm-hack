@@ -1,9 +1,8 @@
 'use client';
 
 import { Fragment } from 'react';
-import { cn, pct } from '@/lib/utils';
-import { VeredictoBadge } from '@/components/ui';
-import type { BloqueoMant, FilaPlan, Linea, Turno, Veredicto } from '@/types';
+import { cn } from '@/lib/utils';
+import type { BloqueoMant, FilaPlan, Linea, Turno } from '@/types';
 
 /**
  * Plan calendar / timetable.
@@ -142,7 +141,7 @@ function Cell({
     return (
       <div
         className={cn(
-          'min-h-[68px] border-hairline bg-cream/40 transition-colors',
+          'min-h-[60px] border-hairline bg-cream/40',
           borderLeft && 'border-l',
           borderTop && 'border-t-2 border-hairline-strong',
         )}
@@ -150,11 +149,6 @@ function Cell({
     );
   }
 
-  // Worst-verdict colour wins (evitar > revisar > procede)
-  const worst = worstVeredicto(filas);
-  const palette = veredictoPalette(worst);
-
-  // Multi-OF: show first prominently, rest as a count chip
   const head = filas[0];
   const extra = filas.length - 1;
 
@@ -163,33 +157,19 @@ function Cell({
       type="button"
       onClick={onClick}
       className={cn(
-        'group flex min-h-[68px] flex-col justify-between gap-1 border-hairline px-2 py-1.5 text-left transition-colors',
+        'group flex min-h-[60px] flex-col justify-center gap-0.5 border-hairline bg-surface px-2 py-1.5 text-left transition-colors hover:bg-linen',
         borderLeft && 'border-l',
         borderTop && 'border-t-2 border-hairline-strong',
-        palette.bg,
-        palette.hover,
       )}
-      aria-label={`${head.sku} en L${head.linea} ${head.dia}, ver detalle`}
+      aria-label={`${head.sku} en L${head.linea} ${head.dia}`}
     >
       <div className="flex items-start justify-between gap-1.5">
-        <span className={cn('font-mono text-[11px] font-medium', palette.text)}>
-          {head.sku}
-        </span>
+        <span className="font-mono text-[11px] font-medium text-ink">{head.sku}</span>
         {extra > 0 && (
-          <span className="rounded-full bg-surface px-1.5 py-0.5 text-[10px] font-medium text-ink-3">
+          <span className="rounded-full bg-cream px-1.5 py-0.5 text-[10px] font-medium text-ink-3">
             +{extra}
           </span>
         )}
-      </div>
-      <div className="flex items-end justify-between gap-1.5">
-        {mant && (
-          <span className="eyebrow text-ink-3" title={mant.reason}>
-            🛠
-          </span>
-        )}
-        <span className={cn('num ml-auto text-[11px] font-semibold', palette.text)}>
-          {pct(head.oeePrevisto)}
-        </span>
       </div>
     </button>
   );
@@ -199,60 +179,16 @@ function Cell({
 
 function Leyenda() {
   return (
-    <div className="flex flex-wrap items-center gap-3 border-t border-hairline bg-cream/40 px-4 py-2.5 text-[11px] text-ink-3">
-      <span className="eyebrow text-ink-4">Leyenda</span>
-      <LegendSwatch verdict="procede" label="Procede" />
-      <LegendSwatch verdict="revisar" label="Revisar" />
-      <LegendSwatch verdict="evitar" label="Evitar" />
+    <div className="flex flex-wrap items-center gap-3 border-t border-hairline bg-cream/40 px-4 py-2 text-[11px] text-ink-3">
       <span className="inline-flex items-center gap-1.5">
         <span className="hatch inline-block h-3 w-4 rounded-sm border border-hairline" />
         Mantenimiento / Limpieza programada
       </span>
-      <span className="ml-auto text-ink-4">Haz clic en una celda para ver la evidencia del modelo.</span>
     </div>
   );
 }
 
-function LegendSwatch({ verdict, label }: { verdict: Veredicto; label: string }) {
-  const p = veredictoPalette(verdict);
-  return (
-    <span className="inline-flex items-center gap-1.5">
-      <span className={cn('inline-block h-3 w-4 rounded-sm border border-hairline', p.bg)} />
-      {label}
-    </span>
-  );
-}
-
 /* ─────────────────────────── Helpers ─────────────────────────── */
-
-function veredictoPalette(v: Veredicto) {
-  // Token-only colours per STYLE.md §3
-  if (v === 'evitar') {
-    return {
-      bg: 'bg-damm-soft',
-      hover: 'hover:bg-damm-soft/80',
-      text: 'text-damm-700',
-    };
-  }
-  if (v === 'revisar') {
-    return {
-      bg: 'bg-gold-soft',
-      hover: 'hover:bg-gold-soft/70',
-      text: 'text-gold-700',
-    };
-  }
-  return {
-    bg: 'bg-moss-soft',
-    hover: 'hover:bg-moss-soft/70',
-    text: 'text-moss-700',
-  };
-}
-
-function worstVeredicto(filas: FilaPlan[]): Veredicto {
-  if (filas.some((f) => f.veredicto === 'evitar')) return 'evitar';
-  if (filas.some((f) => f.veredicto === 'revisar')) return 'revisar';
-  return 'procede';
-}
 
 function collectDias(filas: FilaPlan[]): string[] {
   const set = new Set<string>();

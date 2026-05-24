@@ -23,6 +23,12 @@ export interface LineWiseRawResult {
   day_tbl: GradioDataframe;
   line_tbl: GradioDataframe;
   swap_tbl: GradioDataframe;
+  /** Per-OF prediction table from /predict. ONLY populated when calling the
+   *  local sidecar (which runs predict in addition to optimize_v3). When the
+   *  HF Space served the call, this is undefined and per-OF verdicts fall back
+   *  to the heuristic.  Columns: linea, sku, marca, fecha, turno, p10, p50, p90,
+   *  confidence, feasible, feas_reason. */
+  blocks_tbl?: GradioDataframe;
   latencyMs: number;
   via: 'local' | 'hf_space';
 }
@@ -99,18 +105,16 @@ async function callLocal(
       return null;
     }
     const summary_md = String(body.data[0] ?? '');
-    // The Gradio callback wraps engine errors in an "❌ Error" markdown reply
-    // instead of throwing. Detect that and treat it as a failure so we fall
-    // through to HF / heuristic instead of returning a useless empty result.
     if (summary_md.startsWith('❌')) {
       console.warn('[linewise] local sidecar returned engine error:', summary_md.slice(0, 200));
       return null;
     }
     return {
       summary_md,
-      day_tbl:   body.data[1] as GradioDataframe,
-      line_tbl:  body.data[2] as GradioDataframe,
-      swap_tbl:  body.data[3] as GradioDataframe,
+      day_tbl:    body.data[1] as GradioDataframe,
+      line_tbl:   body.data[2] as GradioDataframe,
+      swap_tbl:   body.data[3] as GradioDataframe,
+      blocks_tbl: body.data[4] as GradioDataframe | undefined,
       latencyMs: Date.now() - t0,
       via: 'local',
     };
@@ -280,6 +284,68 @@ export interface SwapRow {
   deltaMantHoras: number;
   agrupaFormato: boolean;
   descripcion: string;
+}
+
+/**
+ * Per-OF predictions from /predict's blocks_tbl. Keyed by (línea, sku, día,
+ * turno) so callers can look up each FilaPlan's predicted OEE individually
+ * instead of falling back to the factory-wide per-día number.
+ *
+ * The Gradio table from predict() uses Title-Cased column names because
+ * _block_table() in app.py calls `.title()` on each column. So 'linea' →
+ * 'Linea', 'feas_reason' → 'Feas Reason'.  We look for both spellings.
+ */
+export interface BlockPrediction {
+  linea: 14 | 17 | 19;
+  sku: string;
+  dia: string;            // ISO yyyy-mm-dd
+  turno: 'M' | 'T' | 'N' | null;
+  p10: number;
+  p50: number;
+  p90: number;
+  confidence: string;
+  feasible: boolean;
+  feasReason: string | null;
+}
+
+export function parseBlocksTable(df?: GradioDataframe): BlockPrediction[] {
+  if (!df?.headers || !df?.data) return [];
+  const find = (name: string) =>
+    df.headers.findIndex(
+      (h) => h.toLowerCase().replace(/\s+/g, '_') === name.toLowerCase(),
+    );
+  const iLinea = find('linea');
+  const iSku   = find('sku');
+  const iDia   = find('fecha');
+  const iTurno = find('turno');
+  const iP10   = find('p10');
+  const iP50   = find('p50');
+  const iP90   = find('p90');
+  const iConf  = find('confidence');
+  const iFeas  = find('feasible');
+  const iReas  = find('feas_reason');
+  if (iLinea < 0 || iSku < 0 || iDia < 0 || iP50 < 0) return [];
+
+  const out: BlockPrediction[] = [];
+  for (const row of df.data) {
+    const lineaNum = Number(row[iLinea]);
+    if (!Number.isFinite(lineaNum)) continue;
+    out.push({
+      linea: lineaNum as 14 | 17 | 19,
+      sku: String(row[iSku] ?? ''),
+      dia: String(row[iDia] ?? '').slice(0, 10),
+      turno: (row[iTurno] as 'M' | 'T' | 'N' | null) ?? null,
+      p10: pctFrom(row[iP10]),
+      p50: pctFrom(row[iP50]),
+      p90: pctFrom(row[iP90]),
+      confidence: String(row[iConf] ?? ''),
+      feasible: row[iFeas] === true || String(row[iFeas]).toLowerCase() === 'true',
+      feasReason: row[iReas] != null && row[iReas] !== ''
+        ? String(row[iReas])
+        : null,
+    });
+  }
+  return out;
 }
 
 export function parseSwapTable(df: GradioDataframe): SwapRow[] {

@@ -419,40 +419,25 @@ export async function analizarPlanConLineWise(
   const dayRows  = parseDayTable(lw.day_tbl);
   const bloqueos = parseBloqueosMant(dayRows) as BloqueoMant[];
 
-  // Total HL across all OFs in the plan (use heuristic baseline — same parsed file)
   const totalHl = base.filas.reduce((acc, f) => acc + f.hlPlan, 0);
 
-  // 4. Augment each FilaPlan with model fields by matching (línea, día, sku).
-  //    Per-OF predictions live only in the swap_log; here we approximate by
-  //    distributing the per-día factory OEE proportionally to each OF and
-  //    apply the model's verdict heuristic (cleaner mapping than today's
-  //    heuristic predecirOEE → still based on model output).
-  const dayIdx = new Map(dayRows.map((r) => [r.dia, r]));
+  // 4. Annotate each FilaPlan with the model's bloqueo info (when applicable),
+  //    but KEEP the heuristic per-OF veredicto (which varies by SKU/línea/
+  //    cambio). The model's headline OEE is factory-wide, not per-OF, so
+  //    forcing every OF to that single number gave them all the same flag.
+  //    For per-OF model predictions we'd need to call /predict — deferred.
   const filasAug: FilaPlan[] = base.filas.map((f) => {
-    const dr = dayIdx.get(f.dia);
-    // model p50 / p90 per OF: factory-wide for that día (better than per-línea due
-    // to Simpson's paradox; per-OF would require the model's swap_log which we
-    // can fetch later via /predict instead of /optimize_v3 if needed).
-    const oeeP50 = dr?.oeeActual ?? f.oeePrevisto;
-    const oeeP90 = dr?.oeeOptimizada ?? f.oeePrevisto;
-    const oeeP10 = Math.max(0.1, oeeP50 - (oeeP90 - oeeP50));
-    // Verdict from model OEE + tipoCambio (same rule as today but on real numbers)
-    const veredicto = veredictoDe(oeeP50, f.tipoCambio, isOnBlock(f, bloqueos));
-    const feasReason = matchFeasReason(f, bloqueos);
-    return {
-      ...f,
-      oeePrevisto: round3(oeeP50),
-      oeeP10: round3(oeeP10),
-      oeeP90: round3(oeeP90),
-      disp:   decomp ? round3(decomp.disp) : undefined,
-      rend:   decomp ? round3(decomp.rend) : undefined,
-      cal:    decomp ? round3(decomp.cal)  : undefined,
-      veredicto,
-      feasReason,
-      // motivo: prefer the explicit feas_reason when present, otherwise keep
-      // the heuristic narrative — both auditable.
-      motivo: feasReason ?? f.motivo,
-    };
+    const feasReasonBloqueo = matchFeasReason(f, bloqueos);
+    if (feasReasonBloqueo) {
+      // OF lands on a blocked slot — override to evitar with the explicit reason
+      return {
+        ...f,
+        veredicto: 'evitar' as Veredicto,
+        feasReason: feasReasonBloqueo,
+        motivo: feasReasonBloqueo,
+      };
+    }
+    return f;
   });
 
   // 5. Recompute banderas + headline numbers from the augmented rows
