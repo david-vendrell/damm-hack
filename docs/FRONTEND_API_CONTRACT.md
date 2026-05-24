@@ -23,16 +23,25 @@ The Space exposes Python functions as HTTP endpoints automatically. You get them
 
 ---
 
-## 2 · The two operations
+## 2 · The two operations (and the two workflows they cover)
 
-The Space exposes exactly two operations the frontend cares about:
+The Space exposes exactly two operations:
 
 | Function | Purpose | Average latency |
 |---|---|---|
 | `/predict` | Parse an uploaded Excel and forecast OEE per block + factory-wide | **3–10 s** |
-| `/optimize_v3` | Same parse + reassign each OF to its best (línea × día × turno) to maximise OEE under all constraints | **30–90 s** (lookup precompute dominates) |
+| `/optimize_v3` | Same parse + reassign each OF to its best (línea × día × turno) to maximise OEE under all constraints | **30–90 s** (lookup precompute dominates; **doubles when `outages_json` or `priority_ofs_json` are non-empty** because the cost-of-incident analysis runs a second pass) |
 
 Both consume the **same Excel file**. The frontend should upload the file once, then offer the user both buttons. The backend re-parses on each call (no shared cache between calls — Gradio is stateless across function invocations).
+
+`/optimize_v3` is **one endpoint that adapts to two distinct workflows** based on which optional parameters you pass:
+
+| Workflow | When | Parameters passed | UX recommendation |
+|---|---|---|---|
+| **A · Initial planning** | Monday morning — planner drafts next week | (nothing optional) | Route under *Validar plan* — single "Optimizar" button |
+| **B · Mid-week replan** | Mid-week — a línea goes down or an urgent order arrives | `outages_json` and/or `priority_ofs_json` and/or `replan_from_ts` | Route under *Urgencias* — separate form with timestamp, outage list and urgent-order list |
+
+Both workflows hit the **same `optimize_v3` function**. The recommendation is to create **two Next.js Route Handlers** (one per workflow) that both proxy to it — see section 6. That way the planner sees two cleanly-distinct surfaces but you maintain one backend.
 
 ---
 
@@ -174,6 +183,7 @@ const result = await client.predict("/optimize_v3", {
   aggressive: false,                    // bool — false=p50 (esperado), true=p90 (perseguir techo)
   outages_json: "[]",                   // OPTIONAL — JSON string, see 5.1.1
   priority_ofs_json: "[]",              // OPTIONAL — JSON string, see 5.1.2
+  replan_from_ts: "",                   // OPTIONAL — ISO timestamp, see 5.1.3
 });
 ```
 
@@ -214,6 +224,36 @@ Empty string or `"[]"` ⇒ no priority OFs.
 
 > ⚠️ **HL impact.** Priority OFs are **additive** to total planned HL (they did not exist in the input plan). The HL-invariance audit excludes them; the optimized headline OEE includes their contribution.
 
+#### 5.1.3 `replan_from_ts` — mid-week replan timestamp (optional)
+
+ISO timestamp marking the moment the planner is reacting from. **Every OF whose scheduled `start_ts` is at or before this moment is pinned** — already produced or currently in-progress, the optimizer cannot move or evict it. Only OFs that start strictly after `replan_from_ts` are rearrangeable.
+
+```ts
+type ReplanFromTs = string;     // "YYYY-MM-DDTHH:MM:SS"  (no timezone — local plant time)
+// Send as: replan_from_ts: "2026-05-27T10:00:00"
+// Empty string ⇒ initial planning mode (everything rearrangeable, today's behaviour)
+```
+
+**When to send it:**
+- **Workflow A (initial planning, Mon AM):** send `""` — every OF is rearrangeable, the full optimizer behaviour applies.
+- **Workflow B (mid-week replan):** send the current wall-clock time as an ISO string. Mon + Tue OFs (and any Wed-AM OF that started before the timestamp) will be pinned. Only the remainder of the week is open to reassignment.
+
+**Defaults & validation:**
+- Empty or missing → initial planning mode (backwards-compatible with v1.1.0 callers)
+- Malformed timestamp → `summary_md` starts with `❌ replan_from_ts no es timestamp válido: …`
+- Any timestamp **before** the plan's earliest day → no OFs frozen (acts like empty)
+- Any timestamp **after** the plan's last day → ALL OFs frozen → optimizer applies zero moves
+
+**What appears in `summary_md` when `replan_from_ts` is set:**
+
+```
+#### 🔒 Replanificación desde 2026-05-27T10:00:00
+- 24 OF(s) congelado(s) (17 000 HL ya producidos o en curso) — el optimizador no los toca.
+- El optimizador sólo reorganiza los OFs posteriores al momento del replán.
+```
+
+If `replan_from_ts` is non-empty AND (`outages_json` OR `priority_ofs_json` is non-empty), the summary also gets a **3-row cost-of-incident table** — see 5.2.
+
 ### 5.2 Response — array of 4 elements
 
 ```ts
@@ -227,14 +267,43 @@ type OptimizeResponse = [
 
 #### `[0] summary_md`
 
-Contains:
+Always contains:
 - 🏭 **OEE de la fábrica** headline — Plan actual → Plan optimizado → Ganancia (in pts)
 - Move count, elapsed seconds, audit status (✅/⚠️)
 - 🛠 Maintenance-day summary (how many días have a scheduled cleaning, audit confirms zero violations)
 - Operational summary (`+X pts OEE · −Y min cambio · Z OFs alejados de mantenimiento`)
 - 🔎 Per-línea **diagnostic** table embedded as Markdown (already includes the Simpson's-paradox explanation note)
 
-Render as-is.
+Additionally appears **only when the relevant parameter is set**:
+
+| Section | Trigger | What it shows |
+|---|---|---|
+| `🔒 Replanificación desde X` | `replan_from_ts` non-empty | Number of frozen OFs + their HL (already produced or in-progress) |
+| `⚡ Incidencias gestionadas` | `outages_json` or `priority_ofs_json` non-empty | Count of outages declared · priority OFs placed vs failed · evictions triggered |
+| `⚖️ Coste de las incidencias` (3-row table) | `outages_json` or `priority_ofs_json` non-empty | See below |
+| `📋 Veredicto por OF prioritario` | `priority_ofs_json` non-empty | Per-OF verdict 🟢 PROCEDE / 🟠 REVISAR / 🔴 EVITAR / 🚫 IMPOSIBLE based on cost in pts + HL displaced |
+
+**The 3-row cost-of-incident table** is the planner's decision-support view when responding to an incident:
+
+```
+|                                     | OEE de la fábrica | Movimientos          |
+|-------------------------------------|------------------:|---------------------:|
+| Plan original (sin incidencia)      | 62.25%            | —                    |
+| Replan mínimo (sólo lo obligatorio) | 61.65%            | 3 🔧 obligatorio(s)  |
+| Replan optimizado (con mejoras)     | 62.25%            | 9 totales (6 💡)     |
+| Diferencia (original → optimizado)  | = +0.00 pts · 500 HL reasignados        |
+
+> Coste real de la incidencia (inevitable): +0.60 pts.
+> Mejora opcional disponible: aceptar los 6 cambios marcados 💡 OPCIONAL añade
+> +0.60 pts extra. Es decisión del planificador …
+```
+
+Reading the three rows:
+- **Plan original** — counterfactual ceiling assuming the incident never happened (computed by re-running the optimizer with empty incidents).
+- **Replan mínimo** — what OEE looks like after applying ONLY the moves forced by the incident (an OF on a blocked slot, an eviction). The diff vs original = **unavoidable cost** of the incident.
+- **Replan optimizado** — the full optimizer output, including discretionary OEE-improving moves. The diff vs mínimo = **discretionary upside** the planner can take or decline.
+
+**Render as-is** — the whole markdown is ready for `react-markdown`. The interpretive prose between the table and the next section is part of the contract.
 
 #### `[1] day_tbl` — RECOMMENDED view to lead with
 
@@ -269,14 +338,29 @@ Same shape as the predict's per-línea but with `actual` vs `optimizada` columns
 | Agrupa formato | string | `Sí` / `""` |
 | Descripción | string | full Spanish reason — render in monospace, this is the audit trail |
 
-The `Tipo` column distinguishes four move kinds:
+The `Tipo` column distinguishes five move kinds (was four prior to v1.3.0):
 
 | Tipo | When |
 |---|---|
-| `⚙️ Optimización` | Normal OEE-improving reassignment from the local search loop |
-| `⭐ Prioritario` | A priority OF has been hard-inserted at the listed `Hacia` slot |
-| `⚠️ Desplazado` | An existing OF was evicted from its slot by a priority insert (Desde populated, Hacia null pending the realojo entry) |
-| `↪️ Realojo` | The displaced OF was reassigned to a new feasible slot (Desde null, Hacia populated) |
+| `🔧 Obligatorio` | The OF was on a hard-blocked slot (LIMPIEZA / MANTENIMIENTO / OUTAGE) — it **had** to move. **No planner discretion: this move stays.** |
+| `💡 Opcional` | The OF was on a fine slot but the optimizer found an OEE improvement by moving it. **The planner can decline this move without violating any constraint.** |
+| `⭐ Prioritario` | A priority OF has been hard-inserted at the listed `Hacia` slot (`Desde` populated) |
+| `⚠️ Desplazado` | An existing OF was evicted from its slot by a priority insert (`Desde` populated, `Hacia` null pending the realojo entry) |
+| `↪️ Realojo` | The displaced OF was reassigned to a new feasible slot (`Desde` null, `Hacia` populated) |
+
+The first two (🔧/💡) are the post-v1.3.0 split of what was previously a single `⚙️ Optimización` tag. The rule:
+
+```
+if move_type == "optimization":
+    Tipo = "🔧 Obligatorio" if is_required else "💡 Opcional"
+```
+
+Where `is_required = True` iff the source slot was hard-blocked. The other three (⭐/⚠️/↪️) are always `is_required = True` by construction.
+
+**Recommended frontend UX for mid-week replans:**
+- Display all 🔧/⭐/⚠️/↪️ moves as a single "Cambios obligatorios" group at the top — the planner cannot decline these.
+- Display 💡 moves as a separate "Mejoras opcionales sugeridas" group with an "Aceptar / Descartar" toggle per row. The OEE delta on each row tells the planner what they'd give up by declining.
+- For initial-planning calls (no incidents), almost every move is 💡 — render them as a single grouped list, no obligatorio split.
 
 Use this as a chronological "reassignments" panel. The `Descripción` is deterministic Spanish — safe to display directly.
 
@@ -327,7 +411,9 @@ export async function POST(req: Request) {
 ```
 
 ```ts
-// app/api/linewise/optimize/route.ts
+// app/api/linewise/plan-week/route.ts
+// Workflow A: initial planning (Monday AM). No incidents, no replan_from_ts.
+// Used by the "Validar plan" route in the platform.
 export const runtime = "nodejs";
 export const maxDuration = 300;   // optimizer can take up to 240s
 
@@ -335,9 +421,8 @@ export async function POST(req: Request) {
   const formData = await req.formData();
   const file = formData.get("file") as File | null;
   const aggressive = formData.get("aggressive") === "true";
-  // Incidencias (optional) — pass through whatever the operator entered.
-  // Each is a JSON string of an array. Empty / "[]" / missing = no incidents.
-  const outages_json      = (formData.get("outages_json")      as string) ?? "[]";
+  // Priority OFs are allowed even in initial planning (planner may know about
+  // urgent commitments from day 1). Outages and replan_from_ts are NOT.
   const priority_ofs_json = (formData.get("priority_ofs_json") as string) ?? "[]";
   if (!file) return new Response("file required", { status: 400 });
 
@@ -347,10 +432,12 @@ export async function POST(req: Request) {
   const result = await client.predict("/optimize_v3", {
     file_obj: file,
     aggressive,
-    outages_json,
+    outages_json: "",            // initial planning: no incidents
     priority_ofs_json,
+    replan_from_ts: "",          // initial planning: all OFs rearrangeable
   });
   return Response.json({
+    mode:       "initial_planning",
     summary_md: result.data[0],
     day_tbl:    result.data[1],
     line_tbl:   result.data[2],
@@ -358,6 +445,59 @@ export async function POST(req: Request) {
   });
 }
 ```
+
+```ts
+// app/api/linewise/replan-incident/route.ts
+// Workflow B: mid-week replan after an outage or urgent order. All four
+// incident parameters are accepted; `replan_from_ts` is REQUIRED.
+// Used by the "Urgencias" route in the platform.
+export const runtime = "nodejs";
+export const maxDuration = 300;
+
+export async function POST(req: Request) {
+  const formData = await req.formData();
+  const file = formData.get("file") as File | null;
+  const aggressive = formData.get("aggressive") === "true";
+  const outages_json      = (formData.get("outages_json")      as string) ?? "[]";
+  const priority_ofs_json = (formData.get("priority_ofs_json") as string) ?? "[]";
+  const replan_from_ts    = (formData.get("replan_from_ts")    as string) ?? "";
+
+  if (!file) return new Response("file required", { status: 400 });
+  if (!replan_from_ts) {
+    return Response.json(
+      { error: "replan_from_ts is required for incident replan" },
+      { status: 400 }
+    );
+  }
+  // Soft check: incident replans should declare at least one incident.
+  if (outages_json === "[]" && priority_ofs_json === "[]") {
+    return Response.json(
+      { error: "Pass at least one outage or priority OF; use /plan-week otherwise" },
+      { status: 400 }
+    );
+  }
+
+  const client = await Client.connect("marcaguilar/linewise-demo", {
+    hf_token: process.env.HF_TOKEN!,
+  });
+  const result = await client.predict("/optimize_v3", {
+    file_obj: file,
+    aggressive,
+    outages_json,
+    priority_ofs_json,
+    replan_from_ts,
+  });
+  return Response.json({
+    mode:       "mid_week_replan",
+    summary_md: result.data[0],     // includes 🔒 Replan + ⚖️ 3-row cost table
+    day_tbl:    result.data[1],
+    line_tbl:   result.data[2],
+    swap_tbl:   result.data[3],     // Tipo column splits into 🔧 vs 💡
+  });
+}
+```
+
+Both routes hit the same Gradio function. The separation is purely a UX clarity benefit on the frontend.
 
 ### 6.2 Client component — upload + display
 
@@ -445,6 +585,9 @@ Reference: https://www.gradio.app/docs/js-client
 7. **Determinism.** Same inputs (file + `aggressive` + `outages_json` + `priority_ofs_json`) → identical output (verified by test #02 in the test suite).
 8. **No model drift mid-session.** The 12 LightGBM models are loaded once per container; restart triggers reload but predictions are identical to the file checksum.
 9. **All swap-log moves are auditable.** Every `swap_tbl` row's `Descripción` is computed deterministically from operational metrics or incident metadata — no LLM in the loop.
+10. **Mid-week freeze invariant.** When `replan_from_ts` is non-empty, every OF whose scheduled `start_ts` is `<= replan_from_ts` is pinned to its original `(línea, fecha, turno)`. The optimizer cannot move it, evict it, or count it among its `swap_log` changes. Verified by test #11 (`scripts/18_run_test_suite.py`) which asserts `frozen_moved == 0` for the entire frozen subset.
+11. **Required vs optional separation.** When the planner accepts only the moves with `🔧 Obligatorio` / `⭐` / `⚠️` / `↪️` tags (skipping every `💡 Opcional`), the resulting OEE equals `score_required_only` shown in the 3-row cost table. The two passes (clean vs full) are computed against the **same frozen baseline** so the cost is honestly attributable to the incident.
+12. **Cost-of-incident sign convention.** In the 3-row table, the `Diferencia` row uses `▼` when the incident hurt OEE (negative pts), `▲` when the incident's priority OF actually helped (positive pts — its higher prediction lifted the HL-weighted average), `=` when within ±0.01 pts. The 3-row math always satisfies `optimized = (mínimo) + (sum of 💡 deltas)` to within rounding.
 
 ---
 
@@ -464,6 +607,7 @@ Pre-built test Excels live in the repo at `juego_de_pruebas/` — the frontend c
 | `08_outage_basico.xlsx` | Baseline + caller passes 1 outage on L17 — incident reassignment |
 | `09_priority_holgado.xlsx` | Baseline + caller passes 1 priority OF that fits without eviction |
 | `10_priority_evict.xlsx` | Baseline + 1 priority OF requiring single-level eviction |
+| `11_replan_midweek.xlsx` | 4-day plan + send `replan_from_ts=2026-05-27T10:00:00` and outages on L17 Wed PM — shows 24 OFs frozen, 3 🔧 obligatorios + 6 💡 opcionales, 3-row cost-of-incident table |
 
 Also useful for screenshots / smoke-testing the integration. Real production files live in `Repte operacions/` (Damm's confidential data — do NOT bundle in the frontend).
 
@@ -479,4 +623,9 @@ Schema changes will be communicated by bumping the version line below.
 
 ---
 
-**Contract version:** `1.1.0` · last updated 2026-05-24 (adds `outages_json` + `priority_ofs_json` to /optimize_v3; new `Tipo` column in swap_tbl; new `audit.priority_violations` + `audit.block_violations` keys)
+**Contract version:** `1.3.0` · last updated 2026-05-24
+
+**Changelog**
+- `1.3.0` (2026-05-24): Adds `replan_from_ts` to `/optimize_v3` (mid-week replan with pinned baseline). Split the `Tipo` column in `swap_tbl` for `optimization` moves into `🔧 Obligatorio` (forced by an incident) vs `💡 Opcional` (planner can decline). New 3-row cost-of-incident table in `summary_md` (Plan original / Replan mínimo / Replan optimizado). New behavioural guarantees #10, #11, #12. Recommended two Next.js Route Handlers (`/plan-week` + `/replan-incident`) backed by the same Gradio endpoint.
+- `1.1.0` (2026-05-24): Adds `outages_json` + `priority_ofs_json` to `/optimize_v3`. New `Tipo` column in `swap_tbl`. New `audit.priority_violations` + `audit.block_violations` keys.
+- `1.0.0` (2026-05-23): Initial contract.
