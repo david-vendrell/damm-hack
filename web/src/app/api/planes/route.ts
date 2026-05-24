@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import { prisma } from '@/server/db';
 import { parsePlanningExcel } from '@/server/parser';
 import { analizarPlanConLineWise } from '@/server/analysis';
+import { saveUpload } from '@/server/upload-store';
 
 export const runtime = 'nodejs';
 // LineWise model on the HF Space can take up to ~90 s on a cold start; give
@@ -45,6 +46,15 @@ export async function POST(req: NextRequest) {
       },
     },
   });
+
+  // Cache the raw Excel buffer to disk so /urgencias can replay it through
+  // LineWise when the planner declares an incident later. Non-fatal if it
+  // fails (just means /urgencias would 410 on this plan).
+  try {
+    await saveUpload(plan.id, file.name, buf);
+  } catch (err) {
+    console.warn('[planes] failed to cache upload buffer:', err);
+  }
 
   // Primary path: LineWise model on HF Space. Falls back to heuristics
   // transparently when HF_TOKEN is missing or the Space is offline. The

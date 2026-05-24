@@ -30,6 +30,76 @@ export interface DistribucionSku {
   valoresOee: number[];
   mediana: number;
   alcanzable: number;
+  // Optional enhancements (back-compat): histogram, weekly trend, percentiles
+  histograma?: { bucket: string; desde: number; hasta: number; count: number }[];
+  tendenciaSemanal?: { semana: number; anio: number; oee: number; n: number }[];
+  percentiles?: { p25: number; p50: number; p75: number; p90: number };
+}
+
+// ---- Post-mortem weekly explorer (Feature 1) ----
+
+export interface SemanaPostMortem {
+  semana: number;            // ISO week 1-52
+  anio: number;
+  semanaLabel: string;       // 'Sem 21 · 19-25 may 2025'
+  desde: string;             // ISO date of first OF in week
+  hasta: string;             // ISO date of last OF in week
+  oeeActual: number;         // 0-1, HL-weighted
+  oeeAlcanzable: number;     // 0-1, HL-weighted from SkuLineaBaseline
+  perdidaPts: number;        // (oeeAlcanzable - oeeActual) * 100
+  hlTotal: number;
+  nOfs: number;
+  porLinea: { linea: Linea; oeeActual: number; oeeAlcanzable: number; perdidaPts: number; nOfs: number }[];
+}
+
+// ---- Post-mortem brief (Feature 2, deterministic) ----
+
+export interface RecomendacionSemana {
+  titulo: string;
+  descripcion: string;
+  gananciaPotencialPts: number;
+  gananciaPotencialHl: number;
+  evidencia: string;
+  /** Optional structured "Leer más" payload: concrete before/after, operational
+   *  metrics, suggested steps, risks. Always populated for model-driven recs
+   *  (built from the SwapRow); also populated for heuristic recs from the
+   *  rule's evidence so the UI shape is uniform. */
+  detalle?: RecomendacionDetalle;
+}
+
+export interface RecomendacionDetalle {
+  /** Concrete before/after movements: typically one row, but priority inserts
+   *  or evictions can be summarised the same way. */
+  cambios: { etiqueta: string; antes: string; despues: string }[];
+  /** Operational impact numbers ready to render. Each goes in its own chip. */
+  metricas: { label: string; value: string; sentido?: 'positivo' | 'negativo' | 'neutro' }[];
+  /** Numbered actionable steps the planner would follow. */
+  pasos: string[];
+  /** Optional caveats — things to double-check before applying. */
+  riesgos?: string[];
+}
+
+export interface WeekBriefKpi {
+  label: string;
+  value: string;
+  accent?: 'damm' | 'gold' | 'moss';
+}
+
+export interface WeekBrief {
+  semana: number;
+  anio: number;
+  semanaLabel: string;
+  summary: string;
+  kpis: WeekBriefKpi[];
+  recomendaciones: RecomendacionSemana[];
+  /** Where the recommendations came from: 'linewise' = LightGBM optimizer
+   *  (rich counterfactual swaps); 'heuristic_fallback' = deterministic rules
+   *  computed from SQLite alone (used when the sidecar is offline). */
+  meta?: {
+    source: 'linewise' | 'heuristic_fallback';
+    via?: 'local' | 'hf_space';
+    latencyMs?: number;
+  };
 }
 
 export interface ShapDriver {
@@ -148,49 +218,25 @@ export interface SkuLineaInfo {
 }
 
 // ---- Urgencias ----
+//
+// The /urgencias route POSTs one of these payloads to /api/urgencias, which
+// proxies to the LineWise model with the incident applied. The response is
+// the same AnalisisPlan shape /validar uses, so the frontend renders both
+// pages with the same components (CalendarGrid, RecoCard, etc.).
 
-export type TipoUrgencia = 'averia' | 'pedido_urgente' | 'incidencia_calidad' | 'falta_material';
-export type ModoUrgencia = 'plan_activo' | 'escenario_libre';
-
-export interface Urgencia {
-  tipo: TipoUrgencia;
-  linea?: Linea;
-  dia?: string;
-  duracionHoras?: number;
-  sku?: string;
-  hl?: number;
-  deadline?: string;
-  formato?: '1/3' | '1/2';
+export interface OutagePayload {
+  linea: Linea;
+  fecha: string;            // ISO yyyy-mm-dd
+  turno: 'M' | 'T' | 'N';
+  motivo?: string;
 }
 
-export interface AccionUrgencia {
-  id: string;
-  tipo: 'mover' | 'reprogramar' | 'priorizar' | 'sustituir';
-  prioridad: 1 | 2 | 3;
-  titulo: string;
-  descripcion: string;
-  ofAfectada?: string;
-  lineaOrigen?: Linea;
-  lineaDestino?: Linea;
-  impactoHl?: number;
-  impactoOeePts?: number;
-}
-
-export interface AnalisisUrgencia {
-  modo: ModoUrgencia;
-  planId?: string;
-  planNombre?: string;
-  urgencia: Urgencia;
-  resumen: string;
-  kpis: {
-    hlEnRiesgo: number;
-    oeePlanOriginal?: number;
-    oeePlanPostIncidencia?: number;
-    oeePlanRecomendado: number;
-    gananciaPts: number;
-  };
-  acciones: AccionUrgencia[];
-  filasAfectadas: FilaPlan[];
+export interface PriorityOfPayload {
+  sku: string;
+  hl: number;
+  deadline: string;         // ISO yyyy-mm-dd
+  preferred_linea?: Linea;
+  reason?: string;
 }
 
 export interface PlanResumen {
