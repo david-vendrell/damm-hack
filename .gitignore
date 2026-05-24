@@ -18,3 +18,4 @@ venv/
 
 # HF staging
 .hf_stage/
+web/public/interactive-3d/

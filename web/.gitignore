@@ -7,3 +7,4 @@ out/
 .DS_Store
 prisma/*.db
 prisma/*.db-journal
+uploads/

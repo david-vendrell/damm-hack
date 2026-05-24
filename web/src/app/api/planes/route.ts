@@ -1,7 +1,8 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { prisma } from '@/server/db';
-import { parseDiarioHl } from '@/server/parser';
+import { parsePlanningExcel } from '@/server/parser';
 import { analizarPlanConLineWise } from '@/server/analysis';
+import { saveUpload } from '@/server/upload-store';
 
 export const runtime = 'nodejs';
 // LineWise model on the HF Space can take up to ~90 s on a cold start; give
@@ -16,10 +17,17 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: 'missing_file' }, { status: 400 });
   }
   const buf = Buffer.from(await file.arrayBuffer());
-  const parsed = parseDiarioHl(buf);
+  // Auto-detects Diario Hl Planif vs Planificado producciones formats
+  const parsed = parsePlanningExcel(buf);
   if (!parsed.length) {
     return NextResponse.json(
-      { error: 'empty_parse', detail: 'No se detectaron filas válidas en el Excel.' },
+      {
+        error: 'empty_parse',
+        detail:
+          'No se detectaron filas válidas. Comprueba que el Excel sea Diario Hl Planif ' +
+          'o Planificado producciones (columnas: Material, Tren, Fecha ini., Definición ' +
+          'de turno, Cntd plan).',
+      },
       { status: 400 },
     );
   }
@@ -39,6 +47,15 @@ export async function POST(req: NextRequest) {
     },
   });
 
+  // Cache the raw Excel buffer to disk so /urgencias can replay it through
+  // LineWise when the planner declares an incident later. Non-fatal if it
+  // fails (just means /urgencias would 410 on this plan).
+  try {
+    await saveUpload(plan.id, file.name, buf);
+  } catch (err) {
+    console.warn('[planes] failed to cache upload buffer:', err);
+  }
+
   // Primary path: LineWise model on HF Space. Falls back to heuristics
   // transparently when HF_TOKEN is missing or the Space is offline. The
   // response always carries `meta.source` so the UI can surface either.
@@ -49,5 +66,16 @@ export async function POST(req: NextRequest) {
     buf,
     file.name,
   );
+  // Cache the full AnalisisPlan back onto the Plan row so /validar can
+  // rehydrate when the user navigates away and comes back — without the
+  // ~13s optimizer round-trip. /api/planes/latest/full reads this back.
+  try {
+    await prisma.plan.update({
+      where: { id: plan.id },
+      data: { analisisJson: JSON.stringify(analisis) },
+    });
+  } catch (err) {
+    console.warn('[planes] failed to cache analisisJson:', err);
+  }
   return NextResponse.json(analisis);
 }

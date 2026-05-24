@@ -1,6 +1,8 @@
 // Servicio de análisis. TODA la inteligencia vive aquí — heurística + DB hoy,
 // modelo ML mañana. La UI nunca conoce la implementación: consume tipos.
 
+import * as XLSX from 'xlsx';
+
 import { prisma } from './db';
 import {
   callLineWise,
@@ -12,23 +14,19 @@ import {
   type SwapRow,
 } from './linewise-client';
 import type {
-  AccionUrgencia,
   AnalisisPlan,
-  AnalisisUrgencia,
   BloqueoMant,
   CategoriaRecomendacion,
   FilaPlan,
   Linea,
-  ModoUrgencia,
   PlanRecomendado,
   PlanResumen,
   PostMortemResumen,
   Recomendacion,
+  RecomendacionDetalle,
   RecomendacionSemana,
   SemanaPostMortem,
   TipoCambio,
-  Turno,
-  Urgencia,
   Veredicto,
   WeekBrief,
   WeekBriefKpi,
@@ -37,17 +35,61 @@ import type {
 // ---------- POST MORTEM ----------
 
 export async function postMortemResumen(): Promise<PostMortemResumen> {
-  // Datos sembrados: hallazgos reales declarados en el brief.
-  const porLinea = [
-    { linea: 14 as Linea, perdidaPts: 5.5, oeeEjecutado: 0.485, oeeAlcanzable: 0.54 },
-    { linea: 17 as Linea, perdidaPts: 8.3, oeeEjecutado: 0.587, oeeAlcanzable: 0.67 },
-    { linea: 19 as Linea, perdidaPts: 7.8, oeeEjecutado: 0.592, oeeAlcanzable: 0.67 },
-  ];
+  // Real computation over the ingested OfHecho table. Falls back to the
+  // historical p80 by (SKU, línea) when SkuLineaBaseline has no row for the
+  // pair, matching the convention used by postMortemBrief.
+  const rows = await prisma.ofHecho.findMany({});
+  if (rows.length === 0) {
+    return {
+      perdidaEvitablePts: 0,
+      ofsPorDebajoPct: 0,
+      hlLatente: 0,
+      ofsAnalizadas: 0,
+      porLinea: [],
+    };
+  }
+  const baselines = await prisma.skuLineaBaseline.findMany();
+  const baselineIdx = new Map(baselines.map((b) => [`${b.skuCodigo}|${b.linea}`, b]));
+  const fallbackIdx = buildSkuLineaP80Fallback(rows);
+
+  let hlConCeiling = 0;
+  let perdidaWeighted = 0;
+  let nBajo = 0;
+  let hlLatente = 0;
+  for (const r of rows) {
+    const key = `${r.sku}|${r.linea}`;
+    const alc = baselineIdx.get(key)?.oeeAlcanzable ?? fallbackIdx.get(key);
+    if (alc === undefined) continue; // unknown ceiling — exclude from loss math
+    hlConCeiling += r.hl;
+    const gap = Math.max(0, alc - r.oee);
+    perdidaWeighted += gap * r.hl;
+    if (r.oee < alc) {
+      nBajo += 1;
+      hlLatente += gap * r.hl;
+    }
+  }
+  const perdidaEvitablePts = hlConCeiling > 0 ? (perdidaWeighted / hlConCeiling) * 100 : 0;
+  const ofsPorDebajoPct = Math.round((nBajo / rows.length) * 100);
+
+  const porLinea: PostMortemResumen['porLinea'] = [];
+  for (const ln of [14, 17, 19] as Linea[]) {
+    const lineaRows = rows.filter((r) => r.linea === ln);
+    if (lineaRows.length === 0) continue;
+    const lAct = hlWeighted(lineaRows);
+    const lAlc = alcanzableHlWeighted(lineaRows, baselineIdx, fallbackIdx);
+    porLinea.push({
+      linea: ln,
+      perdidaPts: Math.round(Math.max(0, (lAlc - lAct) * 100) * 10) / 10,
+      oeeEjecutado: Math.round(lAct * 1000) / 1000,
+      oeeAlcanzable: Math.round(lAlc * 1000) / 1000,
+    });
+  }
+
   return {
-    perdidaEvitablePts: 7.5,
-    ofsPorDebajoPct: 73,
-    hlLatente: 162_000,
-    ofsAnalizadas: 2_217,
+    perdidaEvitablePts: Math.round(perdidaEvitablePts * 10) / 10,
+    ofsPorDebajoPct,
+    hlLatente: Math.round(hlLatente),
+    ofsAnalizadas: rows.length,
     porLinea,
   };
 }
@@ -301,6 +343,204 @@ function hlEs(n: number): string {
   return `${Math.round(n).toLocaleString('es-ES')} Hl`;
 }
 
+/** Synthesise a Planificado-format Excel from a week's historical OFs so the
+ *  LineWise sidecar can run /optimize_v3 over it. The parser detects the
+ *  format by the presence of `Material` AND `Definición de turno` columns,
+ *  so we emit those names exactly.
+ *
+ *  Turno is inferred from `fechaFin` hour when present (T 8-16, N 16-24,
+ *  M 0-8); otherwise defaults to T. The model's turno feature is one of many
+ *  and a default doesn't break inference. */
+function synthesizeWeekExcel(rows: OfRow[]): Buffer {
+  const records = rows.map((r, i) => {
+    const d = r.fechaFin;
+    const h = d.getUTCHours();
+    const turno = h < 8 ? 'M' : h < 16 ? 'T' : 'N';
+    return {
+      Material: r.sku,
+      Tren: r.linea,
+      Fecha_Ini: d,
+      'Definición de turno': turno,
+      'Cntd Plan': Math.max(1, Math.round(r.hl)),
+      'Cntd JDA': Math.max(1, Math.round(r.hl)),
+      'Hora Ini': { M: '00:00', T: '08:00', N: '16:00' }[turno],
+      Secuencia: i + 1,
+    };
+  });
+  const ws = XLSX.utils.json_to_sheet(records);
+  const wb = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(wb, ws, 'Planificado');
+  const arr = XLSX.write(wb, { type: 'buffer', bookType: 'xlsx' }) as Buffer;
+  return arr;
+}
+
+/** Convert the optimizer's swap log into the brief's recommendation shape.
+ *  Each swap is a concrete counterfactual ("had you placed X at Y, OEE
+ *  would have been Z"). Sorted by potential gain, capped at `maxRecos`.
+ *
+ *  The HL gain is approximated as `gananciaPts/100 × hlTotal` — that is, the
+ *  per-move factory-OEE contribution times the week's total HL. It double-counts
+ *  if every swap is applied, but as a per-move headline it answers "what would
+ *  this one move have produced extra" honestly. */
+function swapsToRecomendaciones(
+  swaps: SwapRow[],
+  hlTotal: number,
+  // eslint-disable-next-line @typescript-eslint/no-unused-vars
+  _hlBySku: Map<string, number>,
+  maxRecos = 4,
+): RecomendacionSemana[] {
+  const sorted = [...swaps].sort((a, b) => Math.abs(b.gananciaPts) - Math.abs(a.gananciaPts));
+  const out: RecomendacionSemana[] = [];
+  for (const s of sorted) {
+    if (out.length >= maxRecos) break;
+    if (Math.abs(s.gananciaPts) < 0.05) continue;
+    const fromLabel = s.fromLinea !== null
+      ? `L${s.fromLinea} · ${s.fromDia ?? ''} · ${s.fromTurno ?? ''}`.trim()
+      : 'inserción nueva';
+    const toLabel = s.toLinea !== null
+      ? `L${s.toLinea} · ${s.toDia ?? ''} · ${s.toTurno ?? ''}`.trim()
+      : 'sin destino';
+    const tituloBase = s.categoria === 'prioritario'
+      ? `Insertar ${s.sku} en ${toLabel}`
+      : s.categoria === 'desplazado'
+        ? `Desplazar ${s.sku} de ${fromLabel}`
+        : `Mover ${s.sku} a ${toLabel}`;
+    const detalles: string[] = [];
+    if (Math.abs(s.deltaCambioMin) >= 1) {
+      detalles.push(
+        s.deltaCambioMin < 0
+          ? `ahorra ${Math.abs(Math.round(s.deltaCambioMin))} min de cambio`
+          : `añade ${Math.round(s.deltaCambioMin)} min de cambio`,
+      );
+    }
+    if (Math.abs(s.deltaMantHoras) >= 1) {
+      detalles.push(
+        s.deltaMantHoras > 0
+          ? `se aleja ${Math.round(s.deltaMantHoras)} h de mantenimiento`
+          : `se acerca ${Math.abs(Math.round(s.deltaMantHoras))} h al mantenimiento`,
+      );
+    }
+    if (s.agrupaFormato) detalles.push('agrupa formato');
+    const descripcion = detalles.length > 0
+      ? `Desde ${fromLabel}. ${detalles.join(' · ')}.`
+      : `Desde ${fromLabel}. ${s.descripcion || 'Ajuste de cascada que mejora el OEE de la semana.'}`;
+
+    const gananciaHl = Math.round((Math.abs(s.gananciaPts) / 100) * hlTotal);
+
+    const categoriaLabel: Record<SwapRow['categoria'], string> = {
+      obligatorio: 'Obligatorio (slot bloqueado)',
+      opcional: 'Mejora opcional',
+      prioritario: 'OF prioritario',
+      desplazado: 'Desplazamiento por prioritario',
+      realojo: 'Realojo del desplazado',
+    };
+
+    out.push({
+      titulo: tituloBase,
+      descripcion,
+      gananciaPotencialPts: Math.round(Math.abs(s.gananciaPts) * 10) / 10,
+      gananciaPotencialHl: gananciaHl,
+      evidencia: `${categoriaLabel[s.categoria]} · modelo LightGBM (p90)`,
+      detalle: detalleFromSwap(s, gananciaHl, categoriaLabel[s.categoria]),
+    });
+  }
+  return out;
+}
+
+function detalleFromSwap(
+  s: SwapRow,
+  gananciaHl: number,
+  categoriaText: string,
+): RecomendacionDetalle {
+  const fromLabel = s.fromLinea !== null
+    ? `L${s.fromLinea} · ${s.fromDia ?? ''} · ${s.fromTurno ?? ''}`.trim()
+    : 'Inserción nueva (no existía)';
+  const toLabel = s.toLinea !== null
+    ? `L${s.toLinea} · ${s.toDia ?? ''} · ${s.toTurno ?? ''}`.trim()
+    : 'Sin destino (desplazamiento)';
+
+  const cambios = [
+    {
+      etiqueta: `OF ${s.sku}`,
+      antes: fromLabel,
+      despues: toLabel,
+    },
+  ];
+
+  const metricas: RecomendacionDetalle['metricas'] = [
+    {
+      label: 'ΔOEE (semanal)',
+      value: `+${Math.abs(s.gananciaPts).toFixed(2)} pp`,
+      sentido: 'positivo',
+    },
+    {
+      label: 'HL recuperados',
+      value: `+${gananciaHl.toLocaleString('es-ES')} Hl`,
+      sentido: 'positivo',
+    },
+  ];
+  if (Math.abs(s.deltaCambioMin) >= 1) {
+    const positivo = s.deltaCambioMin < 0;
+    metricas.push({
+      label: 'Minutos de cambio',
+      value: `${positivo ? '−' : '+'}${Math.abs(Math.round(s.deltaCambioMin))} min`,
+      sentido: positivo ? 'positivo' : 'negativo',
+    });
+  }
+  if (Math.abs(s.deltaMantHoras) >= 1) {
+    const positivo = s.deltaMantHoras > 0;
+    metricas.push({
+      label: 'Distancia a mantenimiento',
+      value: `${positivo ? '+' : '−'}${Math.abs(Math.round(s.deltaMantHoras))} h`,
+      sentido: positivo ? 'positivo' : 'negativo',
+    });
+  }
+  if (s.agrupaFormato) {
+    metricas.push({ label: 'Agrupación de formato', value: 'Sí', sentido: 'positivo' });
+  }
+
+  const pasos: string[] = [];
+  if (s.categoria === 'prioritario') {
+    pasos.push(`Reservar el slot ${toLabel} para la OF prioritaria ${s.sku}.`);
+    pasos.push(`Si está ocupado, desplazar la OF de menor OEE × HL al pool de pendientes.`);
+    pasos.push(`Lanzar la producción priorizando el cumplimiento del plazo.`);
+  } else if (s.categoria === 'desplazado') {
+    pasos.push(`Liberar la OF ${s.sku} del slot ${fromLabel} (queda pendiente de realojo).`);
+    pasos.push(`Combinar con la siguiente recomendación de realojo (↪) para no perder el volumen.`);
+  } else {
+    pasos.push(`Confirmar que el slot ${toLabel} tiene capacidad disponible.`);
+    pasos.push(`Trasladar la OF ${s.sku} desde ${fromLabel} al destino.`);
+    pasos.push(`Reordenar las OFs adyacentes para mantener la secuencia operativa.`);
+    pasos.push(`Validar con el supervisor de turno que el cambio respeta los plazos.`);
+  }
+
+  const riesgos: string[] = [];
+  if (s.deltaCambioMin > 0) {
+    riesgos.push(
+      `Añade ${Math.round(s.deltaCambioMin)} min de cambio respecto a la posición original.`,
+    );
+  }
+  if (s.deltaMantHoras < -1) {
+    riesgos.push(
+      `Se acerca ${Math.abs(Math.round(s.deltaMantHoras))} h al mantenimiento más cercano.`,
+    );
+  }
+  if (s.categoria === 'obligatorio') {
+    riesgos.push('El slot de origen estaba bloqueado (LIMPIEZA / MANT / OUTAGE) — el cambio no es opcional.');
+  }
+  if (s.categoria === 'prioritario' && !s.fromLinea) {
+    riesgos.push('Suma HL al plan original; revisar capacidad total de la línea destino.');
+  }
+  riesgos.push(`Categoría: ${categoriaText}.`);
+
+  return { cambios, metricas, pasos, riesgos };
+}
+
+/** In-memory cache keyed by `${semana}-${anio}-${linea ?? 'all'}`. The model
+ *  call takes ~13 s, so caching the result of a click avoids re-running it
+ *  if the user navigates back to the same week within the session. */
+const briefCache = new Map<string, WeekBrief>();
+
 export async function postMortemBrief(
   semana: number,
   anio: number,
@@ -375,6 +615,25 @@ export async function postMortemBrief(
       gananciaPotencialPts: Math.round(gap * lhl / hlTotal * 10) / 10,
       gananciaPotencialHl: lostHl,
       evidencia: `${lineaRows.length} OFs · ${hlEs(lhl)} en L${ln}`,
+      detalle: {
+        cambios: [
+          { etiqueta: `L${ln} esta semana`, antes: pctEs(lAct), despues: pctEs(lAlc) + ' (techo)' },
+        ],
+        metricas: [
+          { label: 'Brecha actual', value: `${gap.toFixed(1)} pp`, sentido: 'negativo' },
+          { label: 'HL latentes', value: hlEs(lostHl), sentido: 'negativo' },
+          { label: 'OFs analizadas', value: `${lineaRows.length}` },
+        ],
+        pasos: [
+          `Identificar las OFs de L${ln} esta semana con OEE por debajo de su mediana histórica.`,
+          `Comparar el mix de SKUs vs semanas con mejor resultado en L${ln}.`,
+          `Revisar si hubo más cambios de formato o mantenimientos no programados.`,
+          `Aplicar las correcciones en la planificación de la próxima semana similar.`,
+        ],
+        riesgos: [
+          'El techo (p80) asume condiciones operativas razonables; eventos puntuales pueden hacerlo inalcanzable.',
+        ],
+      },
     });
   }
 
@@ -395,6 +654,28 @@ export async function postMortemBrief(
         gananciaPotencialPts: Math.round(diffPts * fraction * 10) / 10,
         gananciaPotencialHl: lostHl,
         evidencia: `${conCambio.length} OFs con cambio · ${sinCambio.length} sin cambio`,
+        detalle: {
+          cambios: [
+            { etiqueta: 'OFs con cambio',  antes: pctEs(oeeConCambio), despues: pctEs(oeeSinCambio) + ' (objetivo)' },
+            { etiqueta: 'OFs sin cambio',  antes: pctEs(oeeSinCambio), despues: 'mantener' },
+          ],
+          metricas: [
+            { label: 'Penalización por cambio', value: `${diffPts.toFixed(1)} pp`,                 sentido: 'negativo' },
+            { label: 'OFs con cambio',         value: `${conCambio.length}` },
+            { label: 'OFs sin cambio',         value: `${sinCambio.length}` },
+            { label: 'HL potenciales',         value: hlEs(lostHl),                                sentido: 'positivo' },
+          ],
+          pasos: [
+            'Listar los cambios de formato, marca y CAP que ocurrieron esta semana.',
+            'Reordenar la secuencia para concentrar SKUs del mismo formato en bloques largos.',
+            'Negociar con el plant manager corridas mínimas (p. ej. 8 h) por formato.',
+            'Validar que el orden no choca con plazos de entrega ni con las ventanas de mantenimiento.',
+          ],
+          riesgos: [
+            'Los plazos pueden forzar cambios; priorizar primero las OFs con vencimiento corto.',
+            'Algunas dimensiones (CAP, bandeja) pueden seguir requiriendo cambios aunque el formato sea el mismo.',
+          ],
+        },
       });
     }
   }
@@ -450,6 +731,27 @@ export async function postMortemBrief(
       gananciaPotencialPts: Math.round((s.gap * s.hl / hlTotal) * 10) / 10,
       gananciaPotencialHl: lostHl,
       evidencia: `Baseline histórico p80 ${pctEs(s.alcMean)}`,
+      detalle: {
+        cambios: [
+          { etiqueta: `SKU ${s.sku} en L${s.linea}`, antes: pctEs(s.actMean), despues: pctEs(s.alcMean) + ' (techo)' },
+        ],
+        metricas: [
+          { label: 'Brecha actual', value: `${s.gap.toFixed(1)} pp`,    sentido: 'negativo' },
+          { label: 'HL latentes',   value: hlEs(lostHl),                sentido: 'negativo' },
+          { label: 'OFs analizadas', value: `${s.n}` },
+          { label: 'HL totales SKU',  value: hlEs(s.hl) },
+        ],
+        pasos: [
+          `Repasar las OFs de ${s.sku} en L${s.linea} con OEE por debajo de ${pctEs(s.alcMean)}.`,
+          `Identificar el predecesor que se repite en los peores casos.`,
+          `Estudiar si el SKU encaja mejor en otra línea con baseline más alto.`,
+          `Pedir al equipo de cambio una guía específica para este SKU.`,
+        ],
+        riesgos: [
+          `El histórico p80 viene del mismo (SKU, línea), no es genérico.`,
+          `Si el SKU acaba de incorporarse al portafolio, el baseline puede no estar consolidado.`,
+        ],
+      },
     });
   }
 
@@ -461,14 +763,60 @@ export async function postMortemBrief(
       gananciaPotencialPts: Math.round(Math.abs(deltaPrev) * 10) / 10,
       gananciaPotencialHl: Math.round((Math.abs(deltaPrev) / 100) * hlTotal),
       evidencia: `Sem ${semana - 1}: ${pctEs(oeePrev!)} · Sem ${semana}: ${pctEs(oeeActual)}`,
+      detalle: {
+        cambios: [
+          { etiqueta: `Sem ${semana - 1}`, antes: pctEs(oeePrev!), despues: pctEs(oeeActual) },
+        ],
+        metricas: [
+          { label: 'Caída intersemanal', value: `${Math.abs(deltaPrev).toFixed(1)} pp`, sentido: 'negativo' },
+          { label: 'HL afectados',       value: hlEs(Math.round((Math.abs(deltaPrev) / 100) * hlTotal)) },
+        ],
+        pasos: [
+          `Diff por SKU del mix entre la sem ${semana - 1} y la sem ${semana}.`,
+          'Aislar SKUs nuevos o con HL anómalo respecto a la semana anterior.',
+          'Revisar si hubo mantenimientos correctivos o averías declaradas.',
+          'Confirmar que los cambios en el mix justifican la caída antes de actuar.',
+        ],
+      },
     });
   }
 
-  // Sort by potential gain and cap at 4
+  // Sort deterministic recs by potential gain
   recomendaciones.sort((a, b) => b.gananciaPotencialPts - a.gananciaPotencialPts);
-  const top = recomendaciones.slice(0, 4);
+  const deterministicTop = recomendaciones.slice(0, 4);
 
-  // Summary prose (deterministic)
+  // ---- Try the LineWise model (local sidecar first, HF fallback) ----
+  // Synthesise the week's OFs into a Planificado xlsx and ask the optimizer
+  // for concrete counterfactual moves. When the sidecar is offline we fall
+  // back to the deterministic rules computed above.
+  const cacheKey = `${anio}-${semana}-${linea ?? 'all'}`;
+  const cached = briefCache.get(cacheKey);
+  if (cached) return cached;
+
+  let modelTop: RecomendacionSemana[] = [];
+  let modelMeta: WeekBrief['meta'] = { source: 'heuristic_fallback' };
+  let modelOptimizado: number | undefined;
+  try {
+    const xlsxBuf = synthesizeWeekExcel(rows);
+    const fileName = `postmortem_sem${semana}_${anio}${linea ? `_L${linea}` : ''}.xlsx`;
+    const lw = await callLineWise(xlsxBuf, fileName, { aggressive: true });
+    if (lw) {
+      const swaps = parseSwapTable(lw.swap_tbl);
+      const headline = parseHeadlineOee(lw.summary_md);
+      modelOptimizado = headline.optimizado;
+      const hlBySku = new Map<string, number>();
+      for (const r of rows) hlBySku.set(r.sku, (hlBySku.get(r.sku) ?? 0) + r.hl);
+      modelTop = swapsToRecomendaciones(swaps, hlTotal, hlBySku, 4);
+      modelMeta = { source: 'linewise', via: lw.via, latencyMs: lw.latencyMs };
+    }
+  } catch (err) {
+    // Sidecar threw or network fault — keep heuristic fallback silently.
+    console.warn('[postMortemBrief] model call failed:', err);
+  }
+
+  const top = modelTop.length > 0 ? modelTop : deterministicTop;
+
+  // Summary prose (mentions the model when it surfaced extra gain)
   const summaryParts: string[] = [];
   if (perdidaPts >= 5) {
     summaryParts.push(`La semana ${semana} perdió ${perdidaPts.toFixed(1)} pp frente al alcanzable.`);
@@ -481,7 +829,10 @@ export async function postMortemBrief(
     if (deltaPrev > 1) summaryParts.push(`Mejora de ${deltaPrev.toFixed(1)} pp respecto a la semana anterior.`);
     else if (deltaPrev < -1) summaryParts.push(`Cae ${Math.abs(deltaPrev).toFixed(1)} pp respecto a la semana anterior.`);
   }
-  if (top.length > 0) {
+  if (modelMeta.source === 'linewise' && modelOptimizado !== undefined && modelOptimizado > oeeActual) {
+    const gainPts = (modelOptimizado - oeeActual) * 100;
+    summaryParts.push(`El modelo identifica ${top.length} reasignaciones que habrían añadido ${gainPts.toFixed(1)} pp.`);
+  } else if (top.length > 0) {
     summaryParts.push(`Se detectan ${top.length} palancas para la próxima semana similar.`);
   }
   const summary = summaryParts.join(' ');
@@ -492,15 +843,21 @@ export async function postMortemBrief(
     { label: 'Pérdida', value: `${perdidaPts.toFixed(1)} pp`, accent: 'damm' },
     { label: 'HL totales', value: hlEs(hlTotal) },
   ];
+  if (modelMeta.source === 'linewise' && modelOptimizado !== undefined) {
+    kpis.splice(2, 0, { label: 'Optimizado (modelo)', value: pctEs(modelOptimizado), accent: 'moss' });
+  }
 
-  return {
+  const brief: WeekBrief = {
     semana,
     anio,
     semanaLabel,
     summary,
     kpis,
     recomendaciones: top,
+    meta: modelMeta,
   };
+  briefCache.set(cacheKey, brief);
+  return brief;
 }
 
 export async function listarSkusConBaselines() {
@@ -816,10 +1173,7 @@ export async function analizarPlanConLineWise(
   fileBuffer: Buffer,
   fileName: string,
 ): Promise<AnalisisPlan> {
-  // 1. Heuristic baseline (always runs — never blocks on the Space)
   const base = await analizarPlan(planId, nombre, items);
-
-  // 2. Try the LineWise model in parallel with the heuristic
   const lw = await callLineWise(fileBuffer, fileName, { aggressive: false });
   if (!lw) {
     return {
@@ -830,24 +1184,54 @@ export async function analizarPlanConLineWise(
       },
     };
   }
+  return mapLineWiseToAnalisisPlan(base, lw);
+}
 
-  // 3. Extract model headline + per-día numbers from the response
+/**
+ * NEW — analyze the cached plan with an INCIDENT (outage or priority OF)
+ * applied. Reuses the same LineWise pipeline as /api/planes but with the
+ * incident parameters passed to optimize_v3 + replan_from_ts=now (so any
+ * OFs scheduled before now are pinned).
+ */
+import type { LineWiseRawResult } from './linewise-client';
+
+export async function analizarConIncidencia(
+  planId: string,
+  nombre: string,
+  items: RawItem[],
+  fileBuffer: Buffer,
+  fileName: string,
+  incident: {
+    outages?: { linea: number; fecha: string; turno: string; reason?: string }[];
+    priority_ofs?: { sku: string; hl: number; deadline: string; preferred_linea?: number; reason?: string }[];
+  },
+): Promise<AnalisisPlan | null> {
+  const base = await analizarPlan(planId, nombre, items);
+  const lw = await callLineWise(fileBuffer, fileName, {
+    aggressive: false,
+    outages: incident.outages,
+    priority_ofs: incident.priority_ofs,
+    replan_from_ts: new Date().toISOString(),
+  });
+  if (!lw) return null;   // caller surfaces the model-down error
+  return mapLineWiseToAnalisisPlan(base, lw);
+}
+
+/** Shared post-processing: turn a LineWise raw response + heuristic baseline
+ *  into the AnalisisPlan shape the frontend expects. */
+function mapLineWiseToAnalisisPlan(
+  base: AnalisisPlan,
+  lw: LineWiseRawResult,
+): AnalisisPlan {
   const headline = parseHeadlineOee(lw.summary_md);
   const decomp   = parseDecomposicion(lw.summary_md);
   const dayRows  = parseDayTable(lw.day_tbl);
   const bloqueos = parseBloqueosMant(dayRows) as BloqueoMant[];
-
   const totalHl = base.filas.reduce((acc, f) => acc + f.hlPlan, 0);
 
-  // 4. Annotate each FilaPlan with the model's bloqueo info (when applicable),
-  //    but KEEP the heuristic per-OF veredicto (which varies by SKU/línea/
-  //    cambio). The model's headline OEE is factory-wide, not per-OF, so
-  //    forcing every OF to that single number gave them all the same flag.
-  //    For per-OF model predictions we'd need to call /predict — deferred.
   const filasAug: FilaPlan[] = base.filas.map((f) => {
     const feasReasonBloqueo = matchFeasReason(f, bloqueos);
     if (feasReasonBloqueo) {
-      // OF lands on a blocked slot — override to evitar with the explicit reason
       return {
         ...f,
         veredicto: 'evitar' as Veredicto,
@@ -858,21 +1242,11 @@ export async function analizarPlanConLineWise(
     return f;
   });
 
-  // 5. Recompute banderas + headline numbers from the augmented rows
   const banderas = { evitar: 0, revisar: 0, procede: 0 };
   for (const f of filasAug) banderas[f.veredicto]++;
-  // `Plan actual` from the markdown = the model's baseline OEE for the input
-  // plan (what we want to show as the prediction). `Plan optimizado` = what
-  // the optimizer projects after applying all its proposed swaps — that's
-  // the upper-bound used for the recomendaciones panel comparator.
   const oeeBaseline   = headline.actual     ?? base.oeePrevistoPlan;
   const oeeOptimizado = headline.optimizado ?? oeeBaseline;
 
-  // 6. Build the embedded PlanRecomendado from the optimizer's swap_log.
-  //    `Plan actual` in summary_md is the model's baseline prediction;
-  //    `Plan optimizado` is what the optimizer achieves after applying every
-  //    swap. The diff = total ganancia. Avoids a second round-trip from the
-  //    frontend to /api/planes/[id]/recomendaciones (which only has heuristics).
   const swapRows = parseSwapTable(lw.swap_tbl);
   const planRecomendado = buildPlanRecomendadoFromSwapLog(
     swapRows,
@@ -886,8 +1260,6 @@ export async function analizarPlanConLineWise(
     filas: filasAug,
     oeePrevistoPlan: round3(oeeBaseline),
     banderas,
-    // p10/p90 aren't given by /optimize_v3 — heuristic widening for now;
-    // a future iteration could call /predict in parallel for true quantiles.
     oeeP10Plan: round3(Math.max(0.1, oeeBaseline - 0.10)),
     oeeP90Plan: round3(Math.min(0.95, oeeOptimizado + 0.05)),
     decomposicion: decomp,
@@ -1177,262 +1549,6 @@ async function rankearLineasParaSku(args: {
   return cand;
 }
 
-// ---- Subrutinas por tipo (placeholder) ----
-
-async function analizarAveria(u: Urgencia, ctx: ContextoPlan | null): Promise<{ acciones: AccionUrgencia[]; filas: FilaPlan[]; resumen: string }> {
-  if (!u.linea || !u.dia || !u.duracionHoras) {
-    return { acciones: [], filas: [], resumen: 'Faltan datos de la avería.' };
-  }
-  const dias = rangoDias(u.dia, u.duracionHoras);
-  const acciones: AccionUrgencia[] = [];
-  const filasAfectadas: FilaPlan[] = [];
-
-  if (ctx) {
-    for (const dia of dias) {
-      const filas = ctx.filasPorLineaDia.get(`${u.linea}|${dia}`) ?? [];
-      for (const f of filas) {
-        filasAfectadas.push(f);
-        const candidatas = await rankearLineasParaSku({ sku: f.sku, dia, excluirLinea: u.linea, filasPorLineaDia: ctx.filasPorLineaDia });
-        const top = candidatas[0];
-        if (!top) continue;
-        const prioridad: 1 | 2 | 3 = !top.cambioFormatoRequerido ? 1 : top.oeeAlcanzable > 0.6 ? 2 : 3;
-        const impactoOeePts = Math.round((top.oeeAlcanzable - 0.0) * 100 - (top.cambioFormatoRequerido ? 25 : 0));
-        acciones.push({
-          id: `av-${f.linea}-${f.secuencia}`,
-          tipo: 'mover',
-          prioridad,
-          titulo: `Mover ${f.nombre} a L${top.linea}`,
-          descripcion: top.cambioFormatoRequerido
-            ? `L${top.linea} corre otro formato (${top.formatoActual ?? '—'}), requeriría un cambio de formato. Aun así su baseline (${pctStr(top.oeeAlcanzable)}) es la mejor alternativa.`
-            : `L${top.linea} ya corre el mismo formato ese día (${top.formatoActual ?? '—'}). Solo cambio de cerveza (~40 min). Baseline ${pctStr(top.oeeAlcanzable)}.`,
-          ofAfectada: f.of,
-          lineaOrigen: u.linea,
-          lineaDestino: top.linea,
-          impactoHl: f.hlPlan,
-          impactoOeePts: Math.max(5, impactoOeePts),
-        });
-      }
-    }
-  } else {
-    // Modo libre: ranking general para el SKU típico de la línea afectada.
-    const candidatas = await rankearLineasParaSku({ sku: 'ED13LTNN', excluirLinea: u.linea });
-    candidatas.slice(0, 3).forEach((c, i) => {
-      const prioridad: 1 | 2 | 3 = i === 0 ? 1 : i === 1 ? 2 : 3;
-      acciones.push({
-        id: `av-libre-${c.linea}`,
-        tipo: 'mover',
-        prioridad,
-        titulo: `Redirigir producción a L${c.linea}`,
-        descripcion: `Baseline alcanzable ${pctStr(c.oeeAlcanzable)} · ritmo ${Math.round(c.rateHlH / 1000)}k Hl/h. Verificar compatibilidad de formato antes del cambio.`,
-        lineaOrigen: u.linea,
-        lineaDestino: c.linea,
-        impactoOeePts: Math.round(c.oeeAlcanzable * 100),
-      });
-    });
-  }
-
-  const resumen = ctx
-    ? `Avería en L${u.linea} durante ${u.duracionHoras}h: ${filasAfectadas.length} OFs afectadas, ${acciones.filter((a) => a.prioridad === 1).length} con alternativa limpia.`
-    : `Avería en L${u.linea}: ranking de líneas alternativas según baseline histórico.`;
-  return { acciones, filas: filasAfectadas, resumen };
-}
-
-async function analizarPedidoUrgente(u: Urgencia, ctx: ContextoPlan | null): Promise<{ acciones: AccionUrgencia[]; filas: FilaPlan[]; resumen: string }> {
-  if (!u.sku || !u.hl) {
-    return { acciones: [], filas: [], resumen: 'Faltan SKU o cantidad.' };
-  }
-  const candidatas = await rankearLineasParaSku({ sku: u.sku, dia: u.deadline, filasPorLineaDia: ctx?.filasPorLineaDia });
-  const acciones: AccionUrgencia[] = [];
-  const filasAfectadas: FilaPlan[] = [];
-
-  const top = candidatas[0];
-  if (top) {
-    const horas = u.hl / top.rateHlH;
-    acciones.push({
-      id: `pu-priorizar-${top.linea}`,
-      tipo: 'priorizar',
-      prioridad: 1,
-      titulo: `Inyectar ${u.hl.toLocaleString('es-ES')} Hl en L${top.linea}`,
-      descripcion: `L${top.linea} ${top.cambioFormatoRequerido ? 'requiere cambio de formato' : 'ya corre el formato'} (${pctStr(top.oeeAlcanzable)} alcanzable). Tiempo estimado ${horas.toFixed(1)} h al ritmo histórico.`,
-      lineaDestino: top.linea,
-      impactoHl: u.hl,
-      impactoOeePts: Math.round(top.oeeAlcanzable * 100),
-    });
-
-    if (ctx && u.deadline) {
-      const filas = ctx.filasPorLineaDia.get(`${top.linea}|${u.deadline}`) ?? [];
-      const menor = [...filas].sort((a, b) => a.hlPlan - b.hlPlan)[0];
-      if (menor && menor.hlPlan < u.hl) {
-        filasAfectadas.push(menor);
-        acciones.push({
-          id: `pu-reprogramar-${menor.linea}-${menor.secuencia}`,
-          tipo: 'reprogramar',
-          prioridad: 2,
-          titulo: `Aplazar ${menor.nombre}`,
-          descripcion: `Su volumen (${menor.hlPlan.toLocaleString('es-ES')} Hl) es el menor de L${menor.linea} ese día. Cede hueco al pedido urgente; reubicarla al día siguiente.`,
-          ofAfectada: menor.of,
-          lineaOrigen: menor.linea,
-          impactoHl: menor.hlPlan,
-          impactoOeePts: -3,
-        });
-      }
-    }
-  }
-
-  candidatas.slice(1, 3).forEach((c, i) => {
-    acciones.push({
-      id: `pu-alt-${c.linea}`,
-      tipo: 'mover',
-      prioridad: 3,
-      titulo: `Alternativa: L${c.linea}`,
-      descripcion: `${c.cambioFormatoRequerido ? 'Requiere cambio de formato' : 'Mismo formato corriendo'}. Baseline ${pctStr(c.oeeAlcanzable)}.`,
-      lineaDestino: c.linea,
-      impactoOeePts: Math.round(c.oeeAlcanzable * 100),
-    });
-  });
-
-  const resumen = ctx
-    ? `Pedido urgente: ${u.hl?.toLocaleString('es-ES')} Hl de ${u.sku}. Línea óptima L${top?.linea ?? '?'} (${pctStr(top?.oeeAlcanzable ?? 0)}).`
-    : `Pedido urgente: ${u.hl?.toLocaleString('es-ES')} Hl de ${u.sku}. Sin plan cargado se evalúa solo por baseline histórico.`;
-  return { acciones, filas: filasAfectadas, resumen };
-}
-
-async function analizarIncidenciaCalidad(u: Urgencia, ctx: ContextoPlan | null): Promise<{ acciones: AccionUrgencia[]; filas: FilaPlan[]; resumen: string }> {
-  if (!u.sku || !u.hl) return { acciones: [], filas: [], resumen: 'Faltan datos de la incidencia.' };
-  const candidatas = await rankearLineasParaSku({ sku: u.sku, dia: u.deadline, excluirLinea: u.linea, filasPorLineaDia: ctx?.filasPorLineaDia });
-  const acciones: AccionUrgencia[] = [];
-  const top = candidatas.find((c) => !c.cambioFormatoRequerido) ?? candidatas[0];
-  if (top) {
-    const horas = u.hl / top.rateHlH;
-    acciones.push({
-      id: `iq-reprogramar-${top.linea}`,
-      tipo: 'reprogramar',
-      prioridad: 1,
-      titulo: `Reproducir ${u.hl.toLocaleString('es-ES')} Hl en L${top.linea}`,
-      descripcion: top.cambioFormatoRequerido
-        ? `No hay hueco sin cambio de formato. L${top.linea} es la mejor opción (${pctStr(top.oeeAlcanzable)}); coordinar cambio en la próxima parada.`
-        : `Insertar en L${top.linea} en el primer hueco compatible (mismo formato). ${horas.toFixed(1)} h al ritmo histórico (${pctStr(top.oeeAlcanzable)}).`,
-      lineaDestino: top.linea,
-      impactoHl: u.hl,
-      impactoOeePts: Math.round(top.oeeAlcanzable * 100),
-    });
-  }
-  candidatas.filter((c) => c !== top).slice(0, 2).forEach((c) => {
-    acciones.push({
-      id: `iq-alt-${c.linea}`,
-      tipo: 'mover',
-      prioridad: c.cambioFormatoRequerido ? 3 : 2,
-      titulo: `Alternativa: L${c.linea}`,
-      descripcion: `${c.cambioFormatoRequerido ? 'Requiere cambio de formato' : 'Mismo formato'}. Baseline ${pctStr(c.oeeAlcanzable)}.`,
-      lineaDestino: c.linea,
-      impactoOeePts: Math.round(c.oeeAlcanzable * 100),
-    });
-  });
-  const resumen = `Incidencia de calidad: reproducir ${u.hl.toLocaleString('es-ES')} Hl de ${u.sku}${u.deadline ? ` antes de ${u.deadline}` : ''}.`;
-  return { acciones, filas: [], resumen };
-}
-
-async function analizarFaltaMaterial(u: Urgencia, ctx: ContextoPlan | null): Promise<{ acciones: AccionUrgencia[]; filas: FilaPlan[]; resumen: string }> {
-  if (!u.formato || !u.duracionHoras) return { acciones: [], filas: [], resumen: 'Faltan datos del material.' };
-  const dias = rangoDias(u.dia ?? new Date().toISOString().slice(0, 10), u.duracionHoras);
-  const acciones: AccionUrgencia[] = [];
-  const filasAfectadas: FilaPlan[] = [];
-
-  if (ctx) {
-    for (const dia of dias) {
-      for (const linea of [14, 17, 19] as Linea[]) {
-        const filas = ctx.filasPorLineaDia.get(`${linea}|${dia}`) ?? [];
-        for (const f of filas) {
-          if (formatoDesdeCodigo(f.sku) === u.formato) filasAfectadas.push(f);
-        }
-      }
-    }
-  }
-
-  // SKUs alternativos del otro formato con baseline alto por línea
-  const otroFmt = u.formato === '1/3' ? '1/2' : '1/3';
-  const baselines = await prisma.skuLineaBaseline.findMany({ include: { sku: true } });
-  const alt = baselines
-    .filter((b) => b.sku.formato === otroFmt)
-    .sort((a, b) => b.oeeAlcanzable - a.oeeAlcanzable)
-    .slice(0, 4);
-  alt.forEach((b, i) => {
-    acciones.push({
-      id: `fm-${b.skuCodigo}-${b.linea}`,
-      tipo: 'sustituir',
-      prioridad: i === 0 ? 1 : i < 2 ? 2 : 3,
-      titulo: `Sustituir por ${b.sku.nombre} en L${b.linea}`,
-      descripcion: `Formato ${otroFmt} (no afectado) con baseline ${pctStr(b.oeeAlcanzable)}. Concentra producción mientras no haya material de ${u.formato}.`,
-      lineaDestino: b.linea as Linea,
-      impactoOeePts: Math.round(b.oeeAlcanzable * 100),
-    });
-  });
-
-  const resumen = `Falta material formato ${u.formato} durante ${u.duracionHoras}h: ${filasAfectadas.length} OFs en riesgo, ${alt.length} sustitutos viables.`;
-  return { acciones, filas: filasAfectadas, resumen };
-}
-
-// ---- Entrada pública ----
-
-export async function analizarUrgencia(u: Urgencia, modo: ModoUrgencia): Promise<AnalisisUrgencia> {
-  const ctx = modo === 'plan_activo' ? await cargarContextoPlan() : null;
-  if (modo === 'plan_activo' && !ctx) {
-    throw Object.assign(new Error('no_plan'), { code: 'no_plan' });
-  }
-
-  let result: { acciones: AccionUrgencia[]; filas: FilaPlan[]; resumen: string };
-  switch (u.tipo) {
-    case 'averia': result = await analizarAveria(u, ctx); break;
-    case 'pedido_urgente': result = await analizarPedidoUrgente(u, ctx); break;
-    case 'incidencia_calidad': result = await analizarIncidenciaCalidad(u, ctx); break;
-    case 'falta_material': result = await analizarFaltaMaterial(u, ctx); break;
-  }
-
-  const hlEnRiesgo = result.filas.reduce((a, f) => a + f.hlPlan, 0);
-
-  let oeePlanOriginal: number | undefined;
-  let oeePlanPostIncidencia: number | undefined;
-  let oeePlanRecomendado: number;
-
-  if (ctx) {
-    oeePlanOriginal = ctx.analisis.oeePrevistoPlan;
-    const excl = new Set(result.filas.map((f) => `${f.linea}|${f.secuencia}`));
-    oeePlanPostIncidencia = round3(reevaluarOEE(ctx.analisis.filas, excl, new Map()));
-    // estimación con acciones: damos un boost ponderado por prioridad e impacto.
-    const boost = result.acciones.reduce((acc, a) => {
-      const w = a.prioridad === 1 ? 1 : a.prioridad === 2 ? 0.5 : 0.2;
-      return acc + (a.impactoOeePts ?? 0) * w * (a.impactoHl ?? 1000);
-    }, 0);
-    const totalW = result.acciones.reduce((acc, a) => acc + (a.impactoHl ?? 1000), 0);
-    const promedio = totalW ? boost / totalW : 0;
-    const target = Math.min(0.92, oeePlanOriginal + Math.max(0, (promedio / 100 - 0.45) * 0.4));
-    oeePlanRecomendado = round3(target);
-  } else {
-    const mejorPts = result.acciones[0]?.impactoOeePts ?? 50;
-    oeePlanRecomendado = round3(Math.min(0.92, mejorPts / 100));
-  }
-
-  const gananciaPts = ctx
-    ? Math.max(0, Math.round(((oeePlanRecomendado - (oeePlanPostIncidencia ?? 0)) * 100) * 10) / 10)
-    : Math.round((oeePlanRecomendado - 0.5) * 100 * 10) / 10;
-
-  return {
-    modo,
-    planId: ctx?.planId,
-    planNombre: ctx?.planNombre,
-    urgencia: u,
-    resumen: result.resumen,
-    kpis: {
-      hlEnRiesgo,
-      oeePlanOriginal,
-      oeePlanPostIncidencia,
-      oeePlanRecomendado,
-      gananciaPts,
-    },
-    acciones: result.acciones.sort((a, b) => a.prioridad - b.prioridad),
-    filasAfectadas: result.filas,
-  };
-}
 
 function pctStr(n: number): string {
   return `${Math.round(n * 100)}%`;

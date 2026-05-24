@@ -67,10 +67,13 @@ model Mantenimiento {
 }
 
 model Plan {
-  id       String     @id @default(cuid())
-  nombre   String
-  creadoEn DateTime   @default(now())
-  items    PlanItem[]
+  id           String     @id @default(cuid())
+  nombre       String
+  creadoEn     DateTime   @default(now())
+  items        PlanItem[]
+  // Cached full AnalisisPlan JSON so /validar can rehydrate on revisit
+  // without re-running the optimizer (~13s saved per page load).
+  analisisJson String?
 }
 
 model PlanItem {
