@@ -9,6 +9,12 @@ html,body{margin:0;padding:0;background:#05080f;height:100%;overflow:hidden}
 .lw-demo-btn:hover{box-shadow:0 0 18px 1px rgba(124,58,237,.55);transform:translateY(-1px)}
 .lw-demo-btn.lw-active{background:linear-gradient(135deg,#ef4444,#f59e0b);box-shadow:0 0 22px 1px rgba(245,158,11,.55)}
 .lw-glow-dot{box-shadow:0 0 12px 2px currentColor}
+#slowmo-badge{position:absolute;top:60px;left:50%;transform:translateX(-50%) translateY(-8px);display:none;align-items:center;gap:10px;padding:9px 16px;background:linear-gradient(135deg,rgba(15,23,42,0.92),rgba(30,41,59,0.86));border:1px solid rgba(253,224,71,0.55);border-radius:30px;color:#fde047;font-size:13px;font-weight:600;letter-spacing:1.4px;backdrop-filter:blur(10px);box-shadow:0 0 30px rgba(253,224,71,0.4),inset 0 1px 0 rgba(255,255,255,0.08);z-index:5;opacity:0;transition:opacity .35s ease,transform .35s ease;pointer-events:none}
+#slowmo-badge.lw-visible{display:flex;opacity:1;transform:translateX(-50%) translateY(0)}
+#slowmo-badge .lw-sm-icon{font-size:18px;filter:drop-shadow(0 0 6px rgba(253,224,71,0.7))}
+#slowmo-badge .lw-sm-rate{font-variant-numeric:tabular-nums;font-size:14px;color:#fff;text-shadow:0 0 10px rgba(253,224,71,0.6)}
+#slowmo-badge .lw-sm-bar{width:80px;height:3px;background:rgba(253,224,71,0.18);border-radius:2px;overflow:hidden}
+#slowmo-badge .lw-sm-bar-fill{height:100%;width:0%;background:linear-gradient(90deg,#fde047,#fbbf24);box-shadow:0 0 8px #fde047;transition:width .12s linear}
 </style>
 <div id="scene-wrap" style="position:fixed;inset:0;width:100vw;height:100vh;overflow:hidden;background:#05080f;font-family:var(--font-sans),system-ui,sans-serif">
   <div id="canvas-holder" style="position:absolute;inset:0"></div>
@@ -19,6 +25,8 @@ html,body{margin:0;padding:0;background:#05080f;height:100%;overflow:hidden}
   </div>
 
   <div id="linecards" style="position:absolute;top:62px;right:16px;display:flex;flex-direction:column;gap:8px;pointer-events:none;z-index:3"></div>
+
+  <div id="slowmo-badge"><span class="lw-sm-icon">🎬</span><span>SLOW-MO</span><span class="lw-sm-rate" id="slowmo-rate">0.30×</span><span class="lw-sm-bar"><span class="lw-sm-bar-fill" id="slowmo-bar"></span></span></div>
 
   <!-- Plan simulation overlay: scrubber + play -->
   <div id="overlay-sim" style="position:absolute;left:50%;bottom:16px;transform:translateX(-50%);display:flex;align-items:center;gap:10px;padding:10px 14px;background:rgba(8,15,28,0.86);border:1px solid rgba(148,163,184,0.22);border-radius:11px;color:#e2e8f0;backdrop-filter:blur(7px);font-size:12px;z-index:4;min-width:620px">
@@ -758,82 +766,203 @@ html,body{margin:0;padding:0;background:#05080f;height:100%;overflow:hidden}
   scrubber.addEventListener('input',e=>{setPlaying(false);applyPlanTime(parseFloat(e.target.value));});
   speedSel.addEventListener('change',e=>{speed=parseFloat(e.target.value)||1;});
 
-  // ─── Demo autopilot ───────────────────────────────────────────────────────
+  // ─── Demo: cinematic director (slowmo + always-moving camera) ─────────────
   const demoBtn=document.getElementById('sim-demo');
-  function buildDemoEvents(){
-    const events=[];
-    Object.keys(PLAN_LINES).forEach(lk=>{
-      (PLAN_LINES[lk]||[]).forEach(b=>{
-        if(b.changeoverType && b.changeoverStations && b.changeoverStations.length){
-          events.push({epoch:b.start, line:lk, station:b.changeoverStations[0], sku:b.sku, brand:b.brand});
-        }
-      });
-    });
-    events.sort((a,b)=>a.epoch-b.epoch);
-    return events;
+  const slowmoBadge=document.getElementById('slowmo-badge');
+  const slowmoRateEl=document.getElementById('slowmo-rate');
+  const slowmoBarEl=document.getElementById('slowmo-bar');
+  let slowmoFactor=1.0;
+
+  function _v(x,y,z){return new THREE.Vector3(x,y,z);}
+  function _lerp(a,b,t){return a+(b-a)*t;}
+  function _easeInOut(t){return t<0.5?4*t*t*t:1-Math.pow(-2*t+2,3)/2;}
+  function _easeOut(t){return 1-Math.pow(1-t,3);}
+
+  // Shot primitives — each returns a function (u in [0,1]) -> {pos, target}
+  function shotEstablish(){
+    return (u)=>{
+      const e=_easeInOut(u);
+      // sweep ~35° around origin while descending from y=40 to y=18
+      const ang0=-0.6, ang1=0.4;
+      const a=_lerp(ang0,ang1,e);
+      const r=_lerp(54,40,e);
+      const y=_lerp(40,18,e);
+      return {pos:_v(Math.sin(a)*r, y, Math.cos(a)*r), target:_v(0,2,0)};
+    };
   }
+  function shotLineDolly(lineId){
+    const z=Z_BY_LINE[lineId];
+    return (u)=>{
+      const e=_easeInOut(u);
+      // dolly along the line at a 3/4 angle from one end to the other
+      const x=_lerp(-30,30,e);
+      return {pos:_v(x, 7, z+11), target:_v(x*0.4, 1.5, z)};
+    };
+  }
+  function shotStationOrbit(lineId, stationKey){
+    const z=Z_BY_LINE[lineId];
+    const s=stationByLine[lineId]&&stationByLine[lineId][stationKey];
+    const sx=s?s.x:0, top=s?(s.top||2):2;
+    return (u)=>{
+      // half-circle orbit (210°) at radius 7, height bobs 3→5→3
+      const a=(-Math.PI*0.55) + u*Math.PI*1.15;
+      const r=7.5;
+      const y=3 + 2.0*Math.sin(u*Math.PI);
+      return {pos:_v(sx + Math.cos(a)*r, y, z + Math.sin(a)*r), target:_v(sx, top*0.5+0.6, z)};
+    };
+  }
+  function shotLowPushIn(lineId, stationKey){
+    const z=Z_BY_LINE[lineId];
+    const s=stationByLine[lineId]&&stationByLine[lineId][stationKey];
+    const sx=s?s.x:0, top=s?(s.top||2):2;
+    return (u)=>{
+      const e=_easeInOut(u);
+      // start far + low + offset, push in along axis
+      const dist=_lerp(14, 5.5, e);
+      const y=_lerp(1.8, 3.2, e);
+      const side=_lerp(4.5, 2.0, e);
+      return {pos:_v(sx-dist*0.5, y, z+side), target:_v(sx, top*0.45+0.3, z)};
+    };
+  }
+  function shotPullBack(){
+    return (u)=>{
+      const e=_easeOut(u);
+      // pull back to wide overhead, slight orbit during the hold
+      const angDrift=u*0.4;
+      const r=_lerp(28, 50, e);
+      const y=_lerp(14, 32, e);
+      const a=-0.55 + angDrift;
+      return {pos:_v(Math.sin(a)*r, y, Math.cos(a)*r), target:_v(0,2,0)};
+    };
+  }
+
+  function pickHeroEvents(){
+    const cand=[];
+    Object.keys(PLAN_LINES).forEach(lk=>{
+      const arr=PLAN_LINES[lk]||[];
+      for(let i=0;i<arr.length;i++){
+        const b=arr[i];
+        if(!b.changeoverType || !b.changeoverStations || !b.changeoverStations.length) continue;
+        const prev = i>0 ? arr[i-1] : null;
+        const prevOee = prev?(prev.oee||0.7):0.7;
+        const oeeDelta = Math.abs((b.oee||0.7)-prevOee);
+        const baseScore = b.changeoverType==='brand'?3:(b.changeoverType==='format'?2:1);
+        cand.push({epoch:b.start, line:lk, station:b.changeoverStations[0], score:baseScore + 2*oeeDelta, sku:b.sku, brand:b.brand});
+      }
+    });
+    cand.sort((a,b)=>b.score-a.score);
+    const chosen=[];
+    const span=tMax-tMin;
+    const minGap=span/8;
+    for(const c of cand){
+      if(chosen.length>=4) break;
+      if(chosen.every(ch=>Math.abs(ch.epoch-c.epoch)>=minGap)) chosen.push(c);
+    }
+    chosen.sort((a,b)=>a.epoch-b.epoch);
+    return chosen;
+  }
+
+  function buildTimeline(){
+    const heroes=pickHeroEvents();
+    const tl=[];
+    // OPEN
+    tl.push({label:'OPEN', shot:shotEstablish(), simStart:tMin, simEnd:tMin+4*3600*1000, dur:6000, slowmo:false});
+    heroes.forEach((h,idx)=>{
+      const prevEnd=tl[tl.length-1].simEnd;
+      const cruiseEndSim=Math.max(prevEnd+60*60*1000, h.epoch - 25*60*1000);
+      if(cruiseEndSim>prevEnd){
+        tl.push({label:'CRUISE', shot:shotLineDolly(h.line), simStart:prevEnd, simEnd:cruiseEndSim, dur:5500, slowmo:false});
+      }
+      tl.push({label:'APPROACH', shot:shotLowPushIn(h.line, h.station), simStart:cruiseEndSim, simEnd:h.epoch, dur:2800, slowmo:'ramp'});
+      tl.push({label:'HERO', shot:shotStationOrbit(h.line, h.station), simStart:h.epoch, simEnd:h.epoch+8*60*1000, dur:7500, slowmo:true, hero:h});
+    });
+    // CLOSE
+    tl.push({label:'CLOSE', shot:shotPullBack(), simStart:tl[tl.length-1].simEnd, simEnd:tMax, dur:8000, slowmo:false});
+    return tl;
+  }
+
   const demoState={
-    active:false, events:[], idx:0, nextPanAt:0, prevSpeed:4,
-    holdUntil:0, panLine:0,
+    active:false, timeline:[], idx:0, phaseStart:0, prevSpeed:4,
+    prevPose:null, crossfadeMs:450,
     start(){
       if(!P||tMax<=tMin)return;
-      this.active=true; this.events=buildDemoEvents(); this.idx=0;
+      this.active=true;
+      this.timeline=buildTimeline();
+      if(!this.timeline.length){this.active=false; return;}
+      this.idx=0;
+      this.phaseStart=performance.now();
       this.prevSpeed=speed;
-      speed=8; speedSel.value='8';
-      applyPlanTime(tMin);
-      setPlaying(true);
-      // wide establishing shot
-      startFly(new THREE.Vector3(0,28,46), new THREE.Vector3(0,2,0), 1400);
-      this.nextPanAt=performance.now()+9000;
-      this.holdUntil=0;
+      // stop user playback; director owns the playhead directly
+      setPlaying(false);
+      if(controls){controls.enabled=false;}
+      // seed prevPose with current camera state for the opening cross-fade
+      this.prevPose={pos:camera.position.clone(), target: controls?controls.target.clone():_v(0,2,0)};
+      cameraFly=null; // cancel any manual fly
       demoBtn.classList.add('lw-active');
       demoBtn.textContent='■ Demo';
+      // prime first frame
+      const ph=this.timeline[0];
+      applyPlanTime(ph.simStart);
     },
     cancel(reason){
       if(!this.active)return;
       this.active=false;
+      this.timeline=[]; this.idx=0;
+      slowmoFactor=1.0;
+      slowmoBadge.classList.remove('lw-visible');
       setPlaying(false);
       speed=this.prevSpeed; speedSel.value=String(this.prevSpeed);
+      if(controls){controls.enabled=true;}
       demoBtn.classList.remove('lw-active');
       demoBtn.textContent='▷ Demo';
     },
     tick(nowMs){
       if(!this.active)return;
-      // hold paused while a station is being inspected
-      if(this.holdUntil>0){
-        if(nowMs>=this.holdUntil){
-          this.holdUntil=0;
-          setPlaying(true);
-          // resume by flying back to a 3/4 overview
-          startFly(new THREE.Vector3(0,26,40), new THREE.Vector3(0,2,0), 1100);
-        }
-        return;
+      if(this.idx>=this.timeline.length){this.cancel('end'); return;}
+      const ph=this.timeline[this.idx];
+      let u=(nowMs-this.phaseStart)/ph.dur;
+      if(u>=1){
+        // advance — capture end pose for cross-fade
+        const endPose=ph.shot(1);
+        this.prevPose={pos:_v(endPose.pos.x,endPose.pos.y,endPose.pos.z), target:_v(endPose.target.x,endPose.target.y,endPose.target.z)};
+        this.idx++;
+        this.phaseStart=nowMs;
+        if(this.idx>=this.timeline.length){this.cancel('end'); return;}
+        u=0;
       }
-      // check next changeover event
-      while(this.idx<this.events.length && this.events[this.idx].epoch<=playhead+500){
-        const ev=this.events[this.idx]; this.idx++;
-        const s=stationByLine[ev.line]&&stationByLine[ev.line][ev.station];
-        if(!s)continue;
-        setPlaying(false);
-        show(s);
-        const tgtP=new THREE.Vector3(s.x,(s.top||2)*0.5+0.4, Z_BY_LINE[ev.line]);
-        const camP=new THREE.Vector3(s.x+6.5,(s.top||2)+4.5, Z_BY_LINE[ev.line]+8);
-        startFly(camP, tgtP, 950);
-        this.holdUntil=nowMs+2400;
-        return;
+      const cur=this.timeline[this.idx];
+      // advance sim playhead
+      const simT=_lerp(cur.simStart, cur.simEnd, _easeInOut(u));
+      applyPlanTime(simT);
+      // open side panel for HERO shots
+      if(cur.label==='HERO' && cur.hero && u<0.05){
+        const s=stationByLine[cur.hero.line]&&stationByLine[cur.hero.line][cur.hero.station];
+        if(s) show(s);
       }
-      // end of demo
-      if(playhead>=tMax-1000){
-        this.cancel('end');
-        return;
+      // pose with cross-fade at phase boundaries
+      const pose=cur.shot(u);
+      const crossU=Math.min(1, (nowMs-this.phaseStart)/this.crossfadeMs);
+      let camPos=pose.pos, camTgt=pose.target;
+      if(crossU<1 && this.prevPose){
+        const ce=_easeInOut(crossU);
+        camPos=_v(_lerp(this.prevPose.pos.x,pose.pos.x,ce), _lerp(this.prevPose.pos.y,pose.pos.y,ce), _lerp(this.prevPose.pos.z,pose.pos.z,ce));
+        camTgt=_v(_lerp(this.prevPose.target.x,pose.target.x,ce), _lerp(this.prevPose.target.y,pose.target.y,ce), _lerp(this.prevPose.target.z,pose.target.z,ce));
       }
-      // periodic lateral pan to keep camera alive
-      if(nowMs>=this.nextPanAt && !cameraFly){
-        const lines=['L19','L17','L14'];
-        this.panLine=(this.panLine+1)%lines.length;
-        const z=Z_BY_LINE[lines[this.panLine]];
-        startFly(new THREE.Vector3(2, 18, z+24), new THREE.Vector3(0,2,z), 1700);
-        this.nextPanAt=nowMs+11000;
+      camera.position.copy(camPos);
+      if(controls){controls.target.copy(camTgt); controls.update();}
+      else camera.lookAt(camTgt);
+      // slowmo factor
+      let targetFactor=1.0;
+      if(cur.slowmo===true) targetFactor=0.3;
+      else if(cur.slowmo==='ramp') targetFactor=_lerp(1.0, 0.3, _easeInOut(u));
+      slowmoFactor=targetFactor;
+      // badge
+      if(slowmoFactor<0.95){
+        if(!slowmoBadge.classList.contains('lw-visible')) slowmoBadge.classList.add('lw-visible');
+        slowmoRateEl.textContent=slowmoFactor.toFixed(2)+'×';
+        slowmoBarEl.style.width=(u*100).toFixed(1)+'%';
+      } else {
+        slowmoBadge.classList.remove('lw-visible');
       }
     }
   };
@@ -842,6 +971,10 @@ html,body{margin:0;padding:0;background:#05080f;height:100%;overflow:hidden}
     if(demoState.active) demoState.cancel('user');
     else demoState.start();
   });
+  // cancel demo on any direct interaction with sim controls
+  ['sim-play','sim-prev','sim-next'].forEach(id=>{document.getElementById(id).addEventListener('click',()=>{if(demoState.active)demoState.cancel('user');});});
+  scrubber.addEventListener('pointerdown',()=>{if(demoState.active)demoState.cancel('user');});
+  speedSel.addEventListener('focus',()=>{if(demoState.active)demoState.cancel('user');});
 
   // ─── Animation loop ───────────────────────────────────────────────────────
   let tm=0; const tickDt=0.025;
@@ -851,14 +984,14 @@ html,body{margin:0;padding:0;background:#05080f;height:100%;overflow:hidden}
       if(next>=tMax){applyPlanTime(tMax);setPlaying(false);}
       else applyPlanTime(next);
     }
-    // cans + belt scroll
+    // cans + belt scroll (slowmoFactor scales scene action during demo hero shots)
     cans.forEach(c=>{
-      const mult=lineSpeedMult[c.userData.lineKey]||0;
+      const mult=(lineSpeedMult[c.userData.lineKey]||0)*slowmoFactor;
       c.userData.d+=0.07*mult;
       if(c.userData.d>L_total)c.userData.d-=L_total;
       c.position.x=X0+c.userData.d;
     });
-    Object.keys(beltMat).forEach(lk=>{const t=beltMat[lk].map; if(t){t.offset.x-=0.006*(lineSpeedMult[lk]||0);}});
+    Object.keys(beltMat).forEach(lk=>{const t=beltMat[lk].map; if(t){t.offset.x-=0.006*(lineSpeedMult[lk]||0)*slowmoFactor;}});
 
     // brand floor stripe: lerp + pulse
     Object.keys(lineGlow).forEach(lk=>{
