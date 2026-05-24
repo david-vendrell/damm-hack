@@ -547,6 +547,14 @@ function applyOptimizerSwapsToFilas(filas: FilaPlan[], swaps: SwapRow[]): FilaPl
       if (swap.toLinea) moved.linea = swap.toLinea;
       if (swap.toDia)   moved.dia   = swap.toDia;
       if (swap.toTurno) moved.turno = swap.toTurno;
+      // The maintenance-conflict reason was about the ORIGINAL slot. After
+      // the optimizer moves the OF out, the warning no longer applies.
+      moved.feasReason = undefined;
+      // Veredicto also defaults back to procede; if the new slot is still
+      // problematic that would have been caught when re-scoring the plan,
+      // but for the calendar display the obvious "this was moved here" is
+      // the operational truth.
+      moved.veredicto = 'procede';
     }
   }
   return copy;
@@ -624,7 +632,9 @@ function matchFeasReason(f: FilaPlan, bloqueos: BloqueoMant[]): string | undefin
     (x) => x.linea === f.linea && x.dia === f.dia && (!f.turno || x.turno === f.turno),
   );
   if (!b) return undefined;
-  return `Slot bloqueado: ${b.event} programada en L${b.linea} (${b.dia}, turno ${b.turno}) ${b.reason}`;
+  // b.reason already reads "LIMPIEZA programada en L17 (2026-05-18)" — don't
+  // double-wrap it. Just prepend the "Slot bloqueado:" tag.
+  return `Slot bloqueado · ${b.event} en L${b.linea} ${b.dia} turno ${b.turno}`;
 }
 
 // ============================================================
