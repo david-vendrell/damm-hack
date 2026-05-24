@@ -97,7 +97,17 @@ export interface AnalisisPlan {
     spaceLatencyMs?: number;
     warning?: string;       // shown as small amber badge in the UI when fallback fires
   };
+  // Optimizer's recommendations + headline (populated when meta.source==='linewise').
+  // Lets the frontend skip the secondary /api/planes/[id]/recomendaciones fetch.
+  planRecomendado?: PlanRecomendado;
 }
+
+export type CategoriaRecomendacion =
+  | 'obligatorio'      // 🔧 forced by an incident (blocked slot)
+  | 'opcional'         // 💡 pure OEE improvement, planner may decline
+  | 'prioritario'      // ⭐ caller-injected priority OF
+  | 'desplazado'       // ⚠️ evicted by a priority insert
+  | 'realojo';         // ↪️ displaced OF re-assigned
 
 export interface Recomendacion {
   id: string;
@@ -106,6 +116,12 @@ export interface Recomendacion {
   descripcion: string;
   skusAfectados: string[];
   gananciaPts: number;
+  // ---- Optimizer extras (present when the recommendation came from
+  //      LineWise /optimize_v3 instead of the heuristic recomendarPlan) ----
+  categoria?: CategoriaRecomendacion;
+  deltaCambioMin?: number;      // negative = ahorro de minutos de cambio
+  deltaMantHoras?: number;      // positive = se aleja de mantenimiento
+  agrupaFormato?: boolean;
   antes: { linea: Linea; secuencia: string[] };
   despues: { linea: Linea; secuencia: string[] };
 }
@@ -115,6 +131,8 @@ export interface PlanRecomendado {
   oeePlanRecomendado: number;
   gananciaPts: number;
   recomendaciones: Recomendacion[];
+  // ---- Optimizer metadata (only present when source === 'linewise') ----
+  source?: 'linewise' | 'heuristic_fallback';
 }
 
 export interface SkuLineaInfo {

@@ -8,12 +8,15 @@ import {
   parseDecomposicion,
   parseDayTable,
   parseBloqueosMant,
+  parseSwapTable,
+  type SwapRow,
 } from './linewise-client';
 import type {
   AccionUrgencia,
   AnalisisPlan,
   AnalisisUrgencia,
   BloqueoMant,
+  CategoriaRecomendacion,
   FilaPlan,
   Linea,
   ModoUrgencia,
@@ -458,6 +461,18 @@ export async function analizarPlanConLineWise(
   const oeeP50Plan = headline.p50 ?? base.oeePrevistoPlan;
   const oeeP90Plan = headline.p90 ?? oeeP50Plan;
 
+  // 6. Build the embedded PlanRecomendado from the optimizer's swap_log.
+  //    `Plan actual` in summary_md is the model's baseline prediction;
+  //    `Plan optimizado` is what the optimizer achieves after applying every
+  //    swap. The diff = total ganancia. Avoids a second round-trip from the
+  //    frontend to /api/planes/[id]/recomendaciones (which only has heuristics).
+  const swapRows = parseSwapTable(lw.swap_tbl);
+  const planRecomendado = buildPlanRecomendadoFromSwapLog(
+    swapRows,
+    oeeP50Plan,
+    oeeP90Plan,
+  );
+
   return {
     ...base,
     filas: filasAug,
@@ -469,6 +484,68 @@ export async function analizarPlanConLineWise(
     bloqueosMant: bloqueos,
     totalHl,
     meta: { source: 'linewise', via: lw.via, spaceLatencyMs: lw.latencyMs },
+    planRecomendado,
+  };
+}
+
+/** Turn the optimizer's per-move swap log into the Recomendacion shape the
+ *  existing RecomendacionesPanel renders. Each move becomes one recommendation. */
+function buildPlanRecomendadoFromSwapLog(
+  swaps: SwapRow[],
+  oeeOriginal: number,
+  oeeOptimizado: number,
+): PlanRecomendado {
+  const recomendaciones: Recomendacion[] = swaps.map((s, i) => {
+    // Classify under the existing 3 buckets so the RecomendacionesPanel
+    // styling keeps working: línea change → mover_linea; día change → reprogramar;
+    // turno-only change → reordenar.
+    let tipo: Recomendacion['tipo'] = 'reordenar';
+    if (s.fromLinea !== null && s.toLinea !== null && s.fromLinea !== s.toLinea) tipo = 'mover_linea';
+    else if (s.fromDia !== null && s.toDia !== null && s.fromDia !== s.toDia)    tipo = 'reprogramar';
+
+    const fromLabel = s.fromLinea
+      ? `L${s.fromLinea} ${s.fromDia ?? ''} ${s.fromTurno ?? ''}`.trim()
+      : 'inserción';
+    const toLabel = s.toLinea
+      ? `L${s.toLinea} ${s.toDia ?? ''} ${s.toTurno ?? ''}`.trim()
+      : 'desplazado';
+
+    const titulo = (s.categoria === 'prioritario')
+      ? `Insertar ${s.sku} en ${toLabel}`
+      : (s.categoria === 'desplazado')
+        ? `Desplazar ${s.sku} de ${fromLabel}`
+        : `Mover ${s.sku}: ${fromLabel} → ${toLabel}`;
+
+    return {
+      id: `opt-${i}-${s.sku}`,
+      tipo,
+      titulo,
+      descripcion: s.descripcion,
+      skusAfectados: [s.sku],
+      gananciaPts: s.gananciaPts,
+      categoria: s.categoria as CategoriaRecomendacion,
+      deltaCambioMin: s.deltaCambioMin,
+      deltaMantHoras: s.deltaMantHoras,
+      agrupaFormato: s.agrupaFormato,
+      antes:   { linea: (s.fromLinea ?? 14) as Linea, secuencia: [fromLabel] },
+      despues: { linea: (s.toLinea   ?? s.fromLinea ?? 14) as Linea, secuencia: [toLabel] },
+    };
+  });
+
+  // Sort: required first (operator must apply these), then optional sorted by ganancia desc
+  recomendaciones.sort((a, b) => {
+    const aReq = a.categoria === 'obligatorio' || a.categoria === 'prioritario' || a.categoria === 'desplazado' || a.categoria === 'realojo';
+    const bReq = b.categoria === 'obligatorio' || b.categoria === 'prioritario' || b.categoria === 'desplazado' || b.categoria === 'realojo';
+    if (aReq !== bReq) return aReq ? -1 : 1;
+    return b.gananciaPts - a.gananciaPts;
+  });
+
+  return {
+    oeePlanOriginal:     round3(oeeOriginal),
+    oeePlanRecomendado:  round3(oeeOptimizado),
+    gananciaPts:         Math.round((oeeOptimizado - oeeOriginal) * 100 * 10) / 10,
+    recomendaciones,
+    source: 'linewise',
   };
 }
 

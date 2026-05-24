@@ -251,6 +251,92 @@ function pctFrom(v: unknown): number {
   return numberFrom(v);
 }
 
+/**
+ * Parse the swap_tbl returned by /optimize_v3 into a normalised structure
+ * the analysis layer can map onto our Recomendacion type.
+ *
+ * Tipo column tags (post-v1.3.0): `🔧 Obligatorio`, `💡 Opcional`,
+ * `⭐ Prioritario`, `⚠️ Desplazado`, `↪️ Realojo`.
+ *
+ * Desde / Hacia format: `L17 / 2026-05-18 / N` (línea, ISO date, turno).
+ *                       `—` when from/to is null (priority insert / eviction).
+ */
+export interface SwapRow {
+  categoria: 'obligatorio' | 'opcional' | 'prioritario' | 'desplazado' | 'realojo';
+  sku: string;
+  fromLinea: 14 | 17 | 19 | null;
+  fromDia: string | null;
+  fromTurno: 'M' | 'T' | 'N' | null;
+  toLinea: 14 | 17 | 19 | null;
+  toDia: string | null;
+  toTurno: 'M' | 'T' | 'N' | null;
+  gananciaPts: number;
+  deltaCambioMin: number;
+  deltaMantHoras: number;
+  agrupaFormato: boolean;
+  descripcion: string;
+}
+
+export function parseSwapTable(df: GradioDataframe): SwapRow[] {
+  if (!df?.headers || !df?.data) return [];
+  const find = (name: string) => df.headers.findIndex((h) => h.startsWith(name));
+  const iTipo  = find('Tipo');
+  const iSku   = find('SKU');
+  const iFrom  = find('Desde');
+  const iTo    = find('Hacia');
+  const iOee   = find('ΔOEE');
+  const iCamb  = find('Δ cambio');
+  const iMant  = find('Δ mant');
+  const iFmt   = find('Agrupa');
+  const iDesc  = find('Descripción');
+
+  const out: SwapRow[] = [];
+  for (const row of df.data) {
+    const tipoRaw = String(row[iTipo] ?? '');
+    const cat = parseTipoCategoria(tipoRaw);
+    if (!cat) continue;
+    const from = parseSlotLabel(row[iFrom]);
+    const to   = parseSlotLabel(row[iTo]);
+    out.push({
+      categoria: cat,
+      sku: String(row[iSku] ?? ''),
+      fromLinea: from.linea, fromDia: from.dia, fromTurno: from.turno,
+      toLinea:   to.linea,   toDia:   to.dia,   toTurno:   to.turno,
+      gananciaPts: numberFrom(row[iOee]),
+      deltaCambioMin: numberFrom(row[iCamb]),
+      deltaMantHoras: numberFrom(row[iMant]),
+      agrupaFormato: String(row[iFmt] ?? '').toLowerCase() === 'sí',
+      descripcion: String(row[iDesc] ?? ''),
+    });
+  }
+  return out;
+}
+
+function parseTipoCategoria(s: string): SwapRow['categoria'] | null {
+  if (s.includes('Obligatorio')) return 'obligatorio';
+  if (s.includes('Opcional'))    return 'opcional';
+  if (s.includes('Prioritario')) return 'prioritario';
+  if (s.includes('Desplazado'))  return 'desplazado';
+  if (s.includes('Realojo'))     return 'realojo';
+  return null;
+}
+
+function parseSlotLabel(v: unknown): {
+  linea: 14 | 17 | 19 | null;
+  dia: string | null;
+  turno: 'M' | 'T' | 'N' | null;
+} {
+  const s = String(v ?? '').trim();
+  if (!s || s === '—') return { linea: null, dia: null, turno: null };
+  const m = s.match(/L(\d{2})\s*\/\s*(\d{4}-\d{2}-\d{2})\s*\/\s*([MTN])/);
+  if (!m) return { linea: null, dia: null, turno: null };
+  return {
+    linea: Number(m[1]) as 14 | 17 | 19,
+    dia: m[2],
+    turno: m[3] as 'M' | 'T' | 'N',
+  };
+}
+
 export function parseBloqueosMant(dayRows: DayTableRow[]): {
   linea: 14 | 17 | 19;
   dia: string;

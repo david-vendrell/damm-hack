@@ -48,12 +48,17 @@ export function ValidarView() {
     },
   });
 
+  // When the optimizer ran (meta.source === 'linewise'), AnalisisPlan already
+  // carries planRecomendado built from the swap_log — no second round-trip.
+  // Otherwise fall back to the heuristic /api/planes/[id]/recomendaciones.
+  const recosFromOptimizer = analisis?.planRecomendado;
   const recos = useQuery({
     queryKey: ['recos', analisis?.planId],
-    enabled: !!analisis?.planId,
+    enabled: !!analisis?.planId && !recosFromOptimizer,
     queryFn: () => jget<PlanRecomendado>(`/api/planes/${analisis!.planId}/recomendaciones`),
     staleTime: 60_000,
   });
+  const recosData = recosFromOptimizer ?? recos.data;
 
   const handleFile = (f: File | null) => {
     if (f) upload.mutate(f);
@@ -94,7 +99,7 @@ export function ValidarView() {
         <>
           <PlanHero
             analisis={analisis}
-            recos={recos.data}
+            recos={recosData}
             onReset={() => setAnalisis(null)}
           />
 
@@ -125,10 +130,11 @@ export function ValidarView() {
             />
           </section>
 
-          {/* Recomendaciones */}
-          {recos.data && (
+          {/* Recomendaciones — directly from the optimizer's swap_log
+              (no second fetch needed when analisis.planRecomendado is set) */}
+          {recosData && (
             <RecomendacionesPanel
-              data={recos.data}
+              data={recosData}
               applied={applied}
               setApplied={setApplied}
               oeeOriginal={analisis.oeePrevistoPlan}
@@ -401,18 +407,52 @@ function RecoCard({ reco, applied, onToggle }: { reco: Recomendacion; applied: b
     mover_linea: { label: 'Mover de línea', cls: 'bg-damm-soft text-damm-700' },
     reprogramar: { label: 'Reprogramar', cls: 'bg-moss-soft text-moss-700' },
   } as const;
+  const catMap = {
+    obligatorio: { label: '🔧 Obligatorio', cls: 'bg-damm-soft text-damm-700' },
+    opcional:    { label: '💡 Opcional',    cls: 'bg-cream text-ink-3' },
+    prioritario: { label: '⭐ Prioritario', cls: 'bg-gold-soft text-gold-700' },
+    desplazado:  { label: '⚠️ Desplazado',  cls: 'bg-damm-soft text-damm-700' },
+    realojo:     { label: '↪️ Realojo',     cls: 'bg-moss-soft text-moss-700' },
+  } as const;
   const t = tipoMap[reco.tipo];
+  const cat = reco.categoria ? catMap[reco.categoria] : null;
   return (
     <div className={cn('rounded-card border bg-surface p-4 transition-colors', applied ? 'border-moss' : 'border-hairline')}>
       <div className="flex items-start justify-between gap-4">
         <div className="flex-1">
-          <div className="flex items-center gap-2">
+          <div className="flex flex-wrap items-center gap-2">
+            {cat && (
+              <span className={cn('inline-flex rounded-pill px-2 py-0.5 text-[11px] font-medium uppercase tracking-wider', cat.cls)}>
+                {cat.label}
+              </span>
+            )}
             <span className={cn('inline-flex rounded-pill px-2 py-0.5 text-[11px] font-medium uppercase tracking-wider', t.cls)}>
               {t.label}
             </span>
             <span className="text-sm font-medium text-ink">{reco.titulo}</span>
           </div>
           <p className="mt-1.5 text-sm text-ink-3">{reco.descripcion}</p>
+          {(reco.deltaCambioMin !== undefined || reco.deltaMantHoras !== undefined || reco.agrupaFormato) && (
+            <div className="mt-2 flex flex-wrap gap-3 text-[11px] text-ink-3">
+              {reco.deltaCambioMin !== undefined && reco.deltaCambioMin !== 0 && (
+                <span className="num">
+                  Δ cambio:&nbsp;
+                  <strong className={reco.deltaCambioMin < 0 ? 'text-moss-700' : 'text-damm-700'}>
+                    {reco.deltaCambioMin > 0 ? '+' : ''}{reco.deltaCambioMin} min
+                  </strong>
+                </span>
+              )}
+              {reco.deltaMantHoras !== undefined && reco.deltaMantHoras !== 0 && (
+                <span className="num">
+                  Δ mant:&nbsp;
+                  <strong className={reco.deltaMantHoras > 0 ? 'text-moss-700' : 'text-damm-700'}>
+                    {reco.deltaMantHoras > 0 ? '+' : ''}{reco.deltaMantHoras} h
+                  </strong>
+                </span>
+              )}
+              {reco.agrupaFormato && <span className="text-moss-700">✓ agrupa formato</span>}
+            </div>
+          )}
           {(reco.tipo === 'reordenar' || reco.tipo === 'mover_linea') && (
             <div className="mt-3 space-y-1.5 text-xs">
               <SecuenciaLinea label={`Antes — L${reco.antes.linea}`} skus={reco.antes.secuencia} />
