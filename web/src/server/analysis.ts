@@ -12,21 +12,16 @@ import {
   type SwapRow,
 } from './linewise-client';
 import type {
-  AccionUrgencia,
   AnalisisPlan,
-  AnalisisUrgencia,
   BloqueoMant,
   CategoriaRecomendacion,
   FilaPlan,
   Linea,
-  ModoUrgencia,
   PlanRecomendado,
   PlanResumen,
   PostMortemResumen,
   Recomendacion,
   TipoCambio,
-  Turno,
-  Urgencia,
   Veredicto,
 } from '@/types';
 
@@ -398,10 +393,7 @@ export async function analizarPlanConLineWise(
   fileBuffer: Buffer,
   fileName: string,
 ): Promise<AnalisisPlan> {
-  // 1. Heuristic baseline (always runs — never blocks on the Space)
   const base = await analizarPlan(planId, nombre, items);
-
-  // 2. Try the LineWise model in parallel with the heuristic
   const lw = await callLineWise(fileBuffer, fileName, { aggressive: false });
   if (!lw) {
     return {
@@ -412,24 +404,54 @@ export async function analizarPlanConLineWise(
       },
     };
   }
+  return mapLineWiseToAnalisisPlan(base, lw);
+}
 
-  // 3. Extract model headline + per-día numbers from the response
+/**
+ * NEW — analyze the cached plan with an INCIDENT (outage or priority OF)
+ * applied. Reuses the same LineWise pipeline as /api/planes but with the
+ * incident parameters passed to optimize_v3 + replan_from_ts=now (so any
+ * OFs scheduled before now are pinned).
+ */
+import type { LineWiseRawResult } from './linewise-client';
+
+export async function analizarConIncidencia(
+  planId: string,
+  nombre: string,
+  items: RawItem[],
+  fileBuffer: Buffer,
+  fileName: string,
+  incident: {
+    outages?: { linea: number; fecha: string; turno: string; reason?: string }[];
+    priority_ofs?: { sku: string; hl: number; deadline: string; preferred_linea?: number; reason?: string }[];
+  },
+): Promise<AnalisisPlan | null> {
+  const base = await analizarPlan(planId, nombre, items);
+  const lw = await callLineWise(fileBuffer, fileName, {
+    aggressive: false,
+    outages: incident.outages,
+    priority_ofs: incident.priority_ofs,
+    replan_from_ts: new Date().toISOString(),
+  });
+  if (!lw) return null;   // caller surfaces the model-down error
+  return mapLineWiseToAnalisisPlan(base, lw);
+}
+
+/** Shared post-processing: turn a LineWise raw response + heuristic baseline
+ *  into the AnalisisPlan shape the frontend expects. */
+function mapLineWiseToAnalisisPlan(
+  base: AnalisisPlan,
+  lw: LineWiseRawResult,
+): AnalisisPlan {
   const headline = parseHeadlineOee(lw.summary_md);
   const decomp   = parseDecomposicion(lw.summary_md);
   const dayRows  = parseDayTable(lw.day_tbl);
   const bloqueos = parseBloqueosMant(dayRows) as BloqueoMant[];
-
   const totalHl = base.filas.reduce((acc, f) => acc + f.hlPlan, 0);
 
-  // 4. Annotate each FilaPlan with the model's bloqueo info (when applicable),
-  //    but KEEP the heuristic per-OF veredicto (which varies by SKU/línea/
-  //    cambio). The model's headline OEE is factory-wide, not per-OF, so
-  //    forcing every OF to that single number gave them all the same flag.
-  //    For per-OF model predictions we'd need to call /predict — deferred.
   const filasAug: FilaPlan[] = base.filas.map((f) => {
     const feasReasonBloqueo = matchFeasReason(f, bloqueos);
     if (feasReasonBloqueo) {
-      // OF lands on a blocked slot — override to evitar with the explicit reason
       return {
         ...f,
         veredicto: 'evitar' as Veredicto,
@@ -440,21 +462,11 @@ export async function analizarPlanConLineWise(
     return f;
   });
 
-  // 5. Recompute banderas + headline numbers from the augmented rows
   const banderas = { evitar: 0, revisar: 0, procede: 0 };
   for (const f of filasAug) banderas[f.veredicto]++;
-  // `Plan actual` from the markdown = the model's baseline OEE for the input
-  // plan (what we want to show as the prediction). `Plan optimizado` = what
-  // the optimizer projects after applying all its proposed swaps — that's
-  // the upper-bound used for the recomendaciones panel comparator.
   const oeeBaseline   = headline.actual     ?? base.oeePrevistoPlan;
   const oeeOptimizado = headline.optimizado ?? oeeBaseline;
 
-  // 6. Build the embedded PlanRecomendado from the optimizer's swap_log.
-  //    `Plan actual` in summary_md is the model's baseline prediction;
-  //    `Plan optimizado` is what the optimizer achieves after applying every
-  //    swap. The diff = total ganancia. Avoids a second round-trip from the
-  //    frontend to /api/planes/[id]/recomendaciones (which only has heuristics).
   const swapRows = parseSwapTable(lw.swap_tbl);
   const planRecomendado = buildPlanRecomendadoFromSwapLog(
     swapRows,
@@ -468,8 +480,6 @@ export async function analizarPlanConLineWise(
     filas: filasAug,
     oeePrevistoPlan: round3(oeeBaseline),
     banderas,
-    // p10/p90 aren't given by /optimize_v3 — heuristic widening for now;
-    // a future iteration could call /predict in parallel for true quantiles.
     oeeP10Plan: round3(Math.max(0.1, oeeBaseline - 0.10)),
     oeeP90Plan: round3(Math.min(0.95, oeeOptimizado + 0.05)),
     decomposicion: decomp,
@@ -759,262 +769,6 @@ async function rankearLineasParaSku(args: {
   return cand;
 }
 
-// ---- Subrutinas por tipo (placeholder) ----
-
-async function analizarAveria(u: Urgencia, ctx: ContextoPlan | null): Promise<{ acciones: AccionUrgencia[]; filas: FilaPlan[]; resumen: string }> {
-  if (!u.linea || !u.dia || !u.duracionHoras) {
-    return { acciones: [], filas: [], resumen: 'Faltan datos de la avería.' };
-  }
-  const dias = rangoDias(u.dia, u.duracionHoras);
-  const acciones: AccionUrgencia[] = [];
-  const filasAfectadas: FilaPlan[] = [];
-
-  if (ctx) {
-    for (const dia of dias) {
-      const filas = ctx.filasPorLineaDia.get(`${u.linea}|${dia}`) ?? [];
-      for (const f of filas) {
-        filasAfectadas.push(f);
-        const candidatas = await rankearLineasParaSku({ sku: f.sku, dia, excluirLinea: u.linea, filasPorLineaDia: ctx.filasPorLineaDia });
-        const top = candidatas[0];
-        if (!top) continue;
-        const prioridad: 1 | 2 | 3 = !top.cambioFormatoRequerido ? 1 : top.oeeAlcanzable > 0.6 ? 2 : 3;
-        const impactoOeePts = Math.round((top.oeeAlcanzable - 0.0) * 100 - (top.cambioFormatoRequerido ? 25 : 0));
-        acciones.push({
-          id: `av-${f.linea}-${f.secuencia}`,
-          tipo: 'mover',
-          prioridad,
-          titulo: `Mover ${f.nombre} a L${top.linea}`,
-          descripcion: top.cambioFormatoRequerido
-            ? `L${top.linea} corre otro formato (${top.formatoActual ?? '—'}), requeriría un cambio de formato. Aun así su baseline (${pctStr(top.oeeAlcanzable)}) es la mejor alternativa.`
-            : `L${top.linea} ya corre el mismo formato ese día (${top.formatoActual ?? '—'}). Solo cambio de cerveza (~40 min). Baseline ${pctStr(top.oeeAlcanzable)}.`,
-          ofAfectada: f.of,
-          lineaOrigen: u.linea,
-          lineaDestino: top.linea,
-          impactoHl: f.hlPlan,
-          impactoOeePts: Math.max(5, impactoOeePts),
-        });
-      }
-    }
-  } else {
-    // Modo libre: ranking general para el SKU típico de la línea afectada.
-    const candidatas = await rankearLineasParaSku({ sku: 'ED13LTNN', excluirLinea: u.linea });
-    candidatas.slice(0, 3).forEach((c, i) => {
-      const prioridad: 1 | 2 | 3 = i === 0 ? 1 : i === 1 ? 2 : 3;
-      acciones.push({
-        id: `av-libre-${c.linea}`,
-        tipo: 'mover',
-        prioridad,
-        titulo: `Redirigir producción a L${c.linea}`,
-        descripcion: `Baseline alcanzable ${pctStr(c.oeeAlcanzable)} · ritmo ${Math.round(c.rateHlH / 1000)}k Hl/h. Verificar compatibilidad de formato antes del cambio.`,
-        lineaOrigen: u.linea,
-        lineaDestino: c.linea,
-        impactoOeePts: Math.round(c.oeeAlcanzable * 100),
-      });
-    });
-  }
-
-  const resumen = ctx
-    ? `Avería en L${u.linea} durante ${u.duracionHoras}h: ${filasAfectadas.length} OFs afectadas, ${acciones.filter((a) => a.prioridad === 1).length} con alternativa limpia.`
-    : `Avería en L${u.linea}: ranking de líneas alternativas según baseline histórico.`;
-  return { acciones, filas: filasAfectadas, resumen };
-}
-
-async function analizarPedidoUrgente(u: Urgencia, ctx: ContextoPlan | null): Promise<{ acciones: AccionUrgencia[]; filas: FilaPlan[]; resumen: string }> {
-  if (!u.sku || !u.hl) {
-    return { acciones: [], filas: [], resumen: 'Faltan SKU o cantidad.' };
-  }
-  const candidatas = await rankearLineasParaSku({ sku: u.sku, dia: u.deadline, filasPorLineaDia: ctx?.filasPorLineaDia });
-  const acciones: AccionUrgencia[] = [];
-  const filasAfectadas: FilaPlan[] = [];
-
-  const top = candidatas[0];
-  if (top) {
-    const horas = u.hl / top.rateHlH;
-    acciones.push({
-      id: `pu-priorizar-${top.linea}`,
-      tipo: 'priorizar',
-      prioridad: 1,
-      titulo: `Inyectar ${u.hl.toLocaleString('es-ES')} Hl en L${top.linea}`,
-      descripcion: `L${top.linea} ${top.cambioFormatoRequerido ? 'requiere cambio de formato' : 'ya corre el formato'} (${pctStr(top.oeeAlcanzable)} alcanzable). Tiempo estimado ${horas.toFixed(1)} h al ritmo histórico.`,
-      lineaDestino: top.linea,
-      impactoHl: u.hl,
-      impactoOeePts: Math.round(top.oeeAlcanzable * 100),
-    });
-
-    if (ctx && u.deadline) {
-      const filas = ctx.filasPorLineaDia.get(`${top.linea}|${u.deadline}`) ?? [];
-      const menor = [...filas].sort((a, b) => a.hlPlan - b.hlPlan)[0];
-      if (menor && menor.hlPlan < u.hl) {
-        filasAfectadas.push(menor);
-        acciones.push({
-          id: `pu-reprogramar-${menor.linea}-${menor.secuencia}`,
-          tipo: 'reprogramar',
-          prioridad: 2,
-          titulo: `Aplazar ${menor.nombre}`,
-          descripcion: `Su volumen (${menor.hlPlan.toLocaleString('es-ES')} Hl) es el menor de L${menor.linea} ese día. Cede hueco al pedido urgente; reubicarla al día siguiente.`,
-          ofAfectada: menor.of,
-          lineaOrigen: menor.linea,
-          impactoHl: menor.hlPlan,
-          impactoOeePts: -3,
-        });
-      }
-    }
-  }
-
-  candidatas.slice(1, 3).forEach((c, i) => {
-    acciones.push({
-      id: `pu-alt-${c.linea}`,
-      tipo: 'mover',
-      prioridad: 3,
-      titulo: `Alternativa: L${c.linea}`,
-      descripcion: `${c.cambioFormatoRequerido ? 'Requiere cambio de formato' : 'Mismo formato corriendo'}. Baseline ${pctStr(c.oeeAlcanzable)}.`,
-      lineaDestino: c.linea,
-      impactoOeePts: Math.round(c.oeeAlcanzable * 100),
-    });
-  });
-
-  const resumen = ctx
-    ? `Pedido urgente: ${u.hl?.toLocaleString('es-ES')} Hl de ${u.sku}. Línea óptima L${top?.linea ?? '?'} (${pctStr(top?.oeeAlcanzable ?? 0)}).`
-    : `Pedido urgente: ${u.hl?.toLocaleString('es-ES')} Hl de ${u.sku}. Sin plan cargado se evalúa solo por baseline histórico.`;
-  return { acciones, filas: filasAfectadas, resumen };
-}
-
-async function analizarIncidenciaCalidad(u: Urgencia, ctx: ContextoPlan | null): Promise<{ acciones: AccionUrgencia[]; filas: FilaPlan[]; resumen: string }> {
-  if (!u.sku || !u.hl) return { acciones: [], filas: [], resumen: 'Faltan datos de la incidencia.' };
-  const candidatas = await rankearLineasParaSku({ sku: u.sku, dia: u.deadline, excluirLinea: u.linea, filasPorLineaDia: ctx?.filasPorLineaDia });
-  const acciones: AccionUrgencia[] = [];
-  const top = candidatas.find((c) => !c.cambioFormatoRequerido) ?? candidatas[0];
-  if (top) {
-    const horas = u.hl / top.rateHlH;
-    acciones.push({
-      id: `iq-reprogramar-${top.linea}`,
-      tipo: 'reprogramar',
-      prioridad: 1,
-      titulo: `Reproducir ${u.hl.toLocaleString('es-ES')} Hl en L${top.linea}`,
-      descripcion: top.cambioFormatoRequerido
-        ? `No hay hueco sin cambio de formato. L${top.linea} es la mejor opción (${pctStr(top.oeeAlcanzable)}); coordinar cambio en la próxima parada.`
-        : `Insertar en L${top.linea} en el primer hueco compatible (mismo formato). ${horas.toFixed(1)} h al ritmo histórico (${pctStr(top.oeeAlcanzable)}).`,
-      lineaDestino: top.linea,
-      impactoHl: u.hl,
-      impactoOeePts: Math.round(top.oeeAlcanzable * 100),
-    });
-  }
-  candidatas.filter((c) => c !== top).slice(0, 2).forEach((c) => {
-    acciones.push({
-      id: `iq-alt-${c.linea}`,
-      tipo: 'mover',
-      prioridad: c.cambioFormatoRequerido ? 3 : 2,
-      titulo: `Alternativa: L${c.linea}`,
-      descripcion: `${c.cambioFormatoRequerido ? 'Requiere cambio de formato' : 'Mismo formato'}. Baseline ${pctStr(c.oeeAlcanzable)}.`,
-      lineaDestino: c.linea,
-      impactoOeePts: Math.round(c.oeeAlcanzable * 100),
-    });
-  });
-  const resumen = `Incidencia de calidad: reproducir ${u.hl.toLocaleString('es-ES')} Hl de ${u.sku}${u.deadline ? ` antes de ${u.deadline}` : ''}.`;
-  return { acciones, filas: [], resumen };
-}
-
-async function analizarFaltaMaterial(u: Urgencia, ctx: ContextoPlan | null): Promise<{ acciones: AccionUrgencia[]; filas: FilaPlan[]; resumen: string }> {
-  if (!u.formato || !u.duracionHoras) return { acciones: [], filas: [], resumen: 'Faltan datos del material.' };
-  const dias = rangoDias(u.dia ?? new Date().toISOString().slice(0, 10), u.duracionHoras);
-  const acciones: AccionUrgencia[] = [];
-  const filasAfectadas: FilaPlan[] = [];
-
-  if (ctx) {
-    for (const dia of dias) {
-      for (const linea of [14, 17, 19] as Linea[]) {
-        const filas = ctx.filasPorLineaDia.get(`${linea}|${dia}`) ?? [];
-        for (const f of filas) {
-          if (formatoDesdeCodigo(f.sku) === u.formato) filasAfectadas.push(f);
-        }
-      }
-    }
-  }
-
-  // SKUs alternativos del otro formato con baseline alto por línea
-  const otroFmt = u.formato === '1/3' ? '1/2' : '1/3';
-  const baselines = await prisma.skuLineaBaseline.findMany({ include: { sku: true } });
-  const alt = baselines
-    .filter((b) => b.sku.formato === otroFmt)
-    .sort((a, b) => b.oeeAlcanzable - a.oeeAlcanzable)
-    .slice(0, 4);
-  alt.forEach((b, i) => {
-    acciones.push({
-      id: `fm-${b.skuCodigo}-${b.linea}`,
-      tipo: 'sustituir',
-      prioridad: i === 0 ? 1 : i < 2 ? 2 : 3,
-      titulo: `Sustituir por ${b.sku.nombre} en L${b.linea}`,
-      descripcion: `Formato ${otroFmt} (no afectado) con baseline ${pctStr(b.oeeAlcanzable)}. Concentra producción mientras no haya material de ${u.formato}.`,
-      lineaDestino: b.linea as Linea,
-      impactoOeePts: Math.round(b.oeeAlcanzable * 100),
-    });
-  });
-
-  const resumen = `Falta material formato ${u.formato} durante ${u.duracionHoras}h: ${filasAfectadas.length} OFs en riesgo, ${alt.length} sustitutos viables.`;
-  return { acciones, filas: filasAfectadas, resumen };
-}
-
-// ---- Entrada pública ----
-
-export async function analizarUrgencia(u: Urgencia, modo: ModoUrgencia): Promise<AnalisisUrgencia> {
-  const ctx = modo === 'plan_activo' ? await cargarContextoPlan() : null;
-  if (modo === 'plan_activo' && !ctx) {
-    throw Object.assign(new Error('no_plan'), { code: 'no_plan' });
-  }
-
-  let result: { acciones: AccionUrgencia[]; filas: FilaPlan[]; resumen: string };
-  switch (u.tipo) {
-    case 'averia': result = await analizarAveria(u, ctx); break;
-    case 'pedido_urgente': result = await analizarPedidoUrgente(u, ctx); break;
-    case 'incidencia_calidad': result = await analizarIncidenciaCalidad(u, ctx); break;
-    case 'falta_material': result = await analizarFaltaMaterial(u, ctx); break;
-  }
-
-  const hlEnRiesgo = result.filas.reduce((a, f) => a + f.hlPlan, 0);
-
-  let oeePlanOriginal: number | undefined;
-  let oeePlanPostIncidencia: number | undefined;
-  let oeePlanRecomendado: number;
-
-  if (ctx) {
-    oeePlanOriginal = ctx.analisis.oeePrevistoPlan;
-    const excl = new Set(result.filas.map((f) => `${f.linea}|${f.secuencia}`));
-    oeePlanPostIncidencia = round3(reevaluarOEE(ctx.analisis.filas, excl, new Map()));
-    // estimación con acciones: damos un boost ponderado por prioridad e impacto.
-    const boost = result.acciones.reduce((acc, a) => {
-      const w = a.prioridad === 1 ? 1 : a.prioridad === 2 ? 0.5 : 0.2;
-      return acc + (a.impactoOeePts ?? 0) * w * (a.impactoHl ?? 1000);
-    }, 0);
-    const totalW = result.acciones.reduce((acc, a) => acc + (a.impactoHl ?? 1000), 0);
-    const promedio = totalW ? boost / totalW : 0;
-    const target = Math.min(0.92, oeePlanOriginal + Math.max(0, (promedio / 100 - 0.45) * 0.4));
-    oeePlanRecomendado = round3(target);
-  } else {
-    const mejorPts = result.acciones[0]?.impactoOeePts ?? 50;
-    oeePlanRecomendado = round3(Math.min(0.92, mejorPts / 100));
-  }
-
-  const gananciaPts = ctx
-    ? Math.max(0, Math.round(((oeePlanRecomendado - (oeePlanPostIncidencia ?? 0)) * 100) * 10) / 10)
-    : Math.round((oeePlanRecomendado - 0.5) * 100 * 10) / 10;
-
-  return {
-    modo,
-    planId: ctx?.planId,
-    planNombre: ctx?.planNombre,
-    urgencia: u,
-    resumen: result.resumen,
-    kpis: {
-      hlEnRiesgo,
-      oeePlanOriginal,
-      oeePlanPostIncidencia,
-      oeePlanRecomendado,
-      gananciaPts,
-    },
-    acciones: result.acciones.sort((a, b) => a.prioridad - b.prioridad),
-    filasAfectadas: result.filas,
-  };
-}
 
 function pctStr(n: number): string {
   return `${Math.round(n * 100)}%`;

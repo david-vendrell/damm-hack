@@ -148,49 +148,25 @@ export interface SkuLineaInfo {
 }
 
 // ---- Urgencias ----
+//
+// The /urgencias route POSTs one of these payloads to /api/urgencias, which
+// proxies to the LineWise model with the incident applied. The response is
+// the same AnalisisPlan shape /validar uses, so the frontend renders both
+// pages with the same components (CalendarGrid, RecoCard, etc.).
 
-export type TipoUrgencia = 'averia' | 'pedido_urgente' | 'incidencia_calidad' | 'falta_material';
-export type ModoUrgencia = 'plan_activo' | 'escenario_libre';
-
-export interface Urgencia {
-  tipo: TipoUrgencia;
-  linea?: Linea;
-  dia?: string;
-  duracionHoras?: number;
-  sku?: string;
-  hl?: number;
-  deadline?: string;
-  formato?: '1/3' | '1/2';
+export interface OutagePayload {
+  linea: Linea;
+  fecha: string;            // ISO yyyy-mm-dd
+  turno: 'M' | 'T' | 'N';
+  motivo?: string;
 }
 
-export interface AccionUrgencia {
-  id: string;
-  tipo: 'mover' | 'reprogramar' | 'priorizar' | 'sustituir';
-  prioridad: 1 | 2 | 3;
-  titulo: string;
-  descripcion: string;
-  ofAfectada?: string;
-  lineaOrigen?: Linea;
-  lineaDestino?: Linea;
-  impactoHl?: number;
-  impactoOeePts?: number;
-}
-
-export interface AnalisisUrgencia {
-  modo: ModoUrgencia;
-  planId?: string;
-  planNombre?: string;
-  urgencia: Urgencia;
-  resumen: string;
-  kpis: {
-    hlEnRiesgo: number;
-    oeePlanOriginal?: number;
-    oeePlanPostIncidencia?: number;
-    oeePlanRecomendado: number;
-    gananciaPts: number;
-  };
-  acciones: AccionUrgencia[];
-  filasAfectadas: FilaPlan[];
+export interface PriorityOfPayload {
+  sku: string;
+  hl: number;
+  deadline: string;         // ISO yyyy-mm-dd
+  preferred_linea?: Linea;
+  reason?: string;
 }
 
 export interface PlanResumen {
