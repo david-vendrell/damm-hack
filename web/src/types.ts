@@ -100,6 +100,10 @@ export interface AnalisisPlan {
   // Optimizer's recommendations + headline (populated when meta.source==='linewise').
   // Lets the frontend skip the secondary /api/planes/[id]/recomendaciones fetch.
   planRecomendado?: PlanRecomendado;
+  // Same FilaPlan list but with the optimizer's swaps APPLIED. Used by the
+  // calendar to switch between "plan original" and "plan optimizado" views
+  // when the planner accepts the recommendations.
+  filasOptimizadas?: FilaPlan[];
 }
 
 export type CategoriaRecomendacion =

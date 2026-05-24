@@ -3,7 +3,7 @@
 import { useMutation, useQuery } from '@tanstack/react-query';
 import { useMemo, useRef, useState } from 'react';
 import {
-  Button, Card, CardHeader, KPI, Pill, SectionTitle, SegmentedControl,
+  Button, Card, CardHeader, KPI, Pill, SectionTitle,
   Skeleton, StatBlock, StatStrip, VeredictoBadge,
 } from '@/components/ui';
 import { AlertTriangle, Sparkles, Upload } from '@/components/icons';
@@ -31,19 +31,18 @@ async function postFile<T>(url: string, file: File): Promise<T> {
 
 export function ValidarView() {
   const [analisis, setAnalisis] = useState<AnalisisPlan | null>(null);
-  const [applied, setApplied] = useState<Set<string>>(new Set());
+  // All-or-nothing: the optimizer produced ONE holistic plan, so the planner
+  // either accepts the whole bundle or doesn't. No per-recommendation selection.
+  const [appliedAll, setAppliedAll] = useState(false);
   const [drawerFilas, setDrawerFilas] = useState<FilaPlan[] | null>(null);
-  const [vista, setVista] = useState<'calendario' | 'tabla'>('calendario');
   const fileRef = useRef<HTMLInputElement>(null);
-  const calRef = useRef<HTMLDivElement>(null);
-  const tablaRef = useRef<HTMLDivElement>(null);
   const [drag, setDrag] = useState(false);
 
   const upload = useMutation({
     mutationFn: (file: File) => postFile<AnalisisPlan>('/api/planes', file),
     onSuccess: (data) => {
       setAnalisis(data);
-      setApplied(new Set());
+      setAppliedAll(false);
       setDrawerFilas(null);
     },
   });
@@ -64,11 +63,12 @@ export function ValidarView() {
     if (f) upload.mutate(f);
   };
 
-  const cambioVista = (v: 'calendario' | 'tabla') => {
-    setVista(v);
-    const target = v === 'calendario' ? calRef.current : tablaRef.current;
-    target?.scrollIntoView({ behavior: 'smooth', block: 'start' });
-  };
+  // The calendar shows the optimized assignments when "Aplicar todas" is
+  // active, otherwise the planner's original plan.
+  const filasParaCalendario =
+    appliedAll && analisis?.filasOptimizadas
+      ? analisis.filasOptimizadas
+      : analisis?.filas;
 
   return (
     <div className="space-y-8">
@@ -107,42 +107,43 @@ export function ValidarView() {
             <FallbackBadge warning={analisis.meta.warning} />
           )}
 
-          <div className="flex items-center justify-between">
-            <SegmentedControl
-              value={vista}
-              onChange={cambioVista}
-              options={[
-                { v: 'calendario', l: 'Calendario' },
-                { v: 'tabla', l: 'Tabla' },
-              ]}
-            />
-            <div className="text-xs text-ink-3">
-              {analisis.filas.length} OFs · {analisis.totalHl ? `${hl(analisis.totalHl)} planificados` : ''}
+          {/* Calendar — answer-first hero. Title shifts between
+              "plan original" and "plan optimizado" based on appliedAll. */}
+          <section aria-label="Calendario del plan" className="space-y-2">
+            <div className="flex flex-wrap items-baseline justify-between gap-2 px-1">
+              <h3 className="serif text-lg font-medium text-ink">
+                {appliedAll ? 'Plan optimizado' : 'Plan original'}
+              </h3>
+              <div className="text-xs text-ink-3">
+                {filasParaCalendario?.length ?? 0} OFs
+                {analisis.totalHl ? ` · ${hl(analisis.totalHl)} planificados` : ''}
+                {appliedAll && (
+                  <span className="ml-2 inline-flex items-center gap-1 rounded-pill bg-moss-soft px-2 py-0.5 text-[11px] font-medium uppercase tracking-wider text-moss-700">
+                    Mejoras aplicadas
+                  </span>
+                )}
+              </div>
             </div>
-          </div>
-
-          {/* Calendar — answer-first hero */}
-          <section ref={calRef} aria-label="Calendario del plan">
             <CalendarGrid
-              bloques={analisis.filas}
+              bloques={filasParaCalendario ?? []}
               bloqueosMant={analisis.bloqueosMant}
               onClickCell={(filas) => setDrawerFilas(filas)}
             />
           </section>
 
-          {/* Recomendaciones — directly from the optimizer's swap_log
-              (no second fetch needed when analisis.planRecomendado is set) */}
+          {/* Recomendaciones — all-or-nothing. The optimizer's swap_log is a
+              holistic plan; partial selection isn't a meaningful operation. */}
           {recosData && (
             <RecomendacionesPanel
               data={recosData}
-              applied={applied}
-              setApplied={setApplied}
+              applied={appliedAll}
+              onToggle={() => setAppliedAll((v) => !v)}
               oeeOriginal={analisis.oeePrevistoPlan}
             />
           )}
 
           {/* Tabla — drill-down */}
-          <section ref={tablaRef} aria-label="Detalle por OF">
+          <section aria-label="Detalle por OF">
             <SectionTitle eyebrow="Drill-down" subtitle="Lista completa de OFs ordenada por línea y secuencia.">
               Detalle por OF
             </SectionTitle>
@@ -222,6 +223,18 @@ function UploadDropzone({
 function PendingState() {
   return (
     <div className="space-y-3">
+      <div className="rounded-card border border-hairline bg-cream/40 px-5 py-4 text-xs text-ink-3">
+        <div className="flex items-center gap-2">
+          <Sparkles className="h-3.5 w-3.5 text-damm" strokeWidth={2} />
+          <span className="font-medium text-ink-2">Procesando con LineWise…</span>
+        </div>
+        <p className="mt-1.5 text-[11px] text-ink-3">
+          Se está corriendo el optimizador V3 sobre el plan: parser → features
+          (cascade-aware lookup ~7&nbsp;000 entries) → predicción de OEE por OF
+          con LightGBM quantile (los mismos 12 modelos del juego de pruebas) →
+          local search de movimientos. **Tardará entre 5 y 15 segundos.**
+        </p>
+      </div>
       <Skeleton className="h-24 w-full" />
       <Skeleton className="h-80 w-full" />
     </div>
@@ -311,49 +324,22 @@ function FallbackBadge({ warning }: { warning?: string }) {
 /* ─────────────────────────── Recomendaciones ─────────────────────────── */
 
 function RecomendacionesPanel({
-  data, applied, setApplied, oeeOriginal,
+  data, applied, onToggle, oeeOriginal,
 }: {
   data: PlanRecomendado;
-  applied: Set<string>;
-  setApplied: (s: Set<string>) => void;
+  applied: boolean;             // all-or-nothing: true = full bundle accepted
+  onToggle: () => void;
   oeeOriginal: number;
 }) {
-  // When the optimizer ran, each recomendación's gananciaPts is the per-move
-  // contribution the model evaluated in context. Summing them is an
-  // upper-bound approximation (real moves interact: applying just one may
-  // give slightly less than its stated ganancia). When ALL are applied, we
-  // know the exact projection (oeePlanRecomendado). For partial selection,
-  // we scale proportionally so 0% selected → 0 pts and 100% → oeeMaximo.
-  const totalGananciaSum = useMemo(
-    () => data.recomendaciones.reduce((acc, r) => acc + Math.max(0, r.gananciaPts), 0),
-    [data],
-  );
-  const gananciaAplicada = useMemo(() => {
-    let sum = 0;
-    for (const r of data.recomendaciones) if (applied.has(r.id)) sum += Math.max(0, r.gananciaPts);
-    if (data.source === 'linewise' && totalGananciaSum > 0) {
-      // Anchor to the optimizer's total projection.
-      const fraction = sum / totalGananciaSum;
-      return fraction * data.gananciaPts;
-    }
-    return Math.min(15, sum * 0.55);   // heuristic-era diminishing returns
-  }, [applied, data, totalGananciaSum]);
-
-  const oeeActual = Math.min(0.95, oeeOriginal + gananciaAplicada / 100);
-  const oeeMaximo = data.oeePlanRecomendado;
-
-  const toggle = (id: string) => {
-    const next = new Set(applied);
-    if (next.has(id)) next.delete(id);
-    else next.add(id);
-    setApplied(next);
-  };
-
   const total = data.recomendaciones.length;
   const nObligatorias = data.recomendaciones.filter(
     (r) => r.categoria && ['obligatorio', 'prioritario', 'desplazado', 'realojo'].includes(r.categoria),
   ).length;
   const nOpcionales = total - nObligatorias;
+
+  // All-or-nothing arithmetic — exactly the optimizer's projection when
+  // accepted, exactly the baseline otherwise. No partial-selection fiction.
+  const oeeShown = applied ? data.oeePlanRecomendado : oeeOriginal;
 
   return (
     <section>
@@ -363,16 +349,8 @@ function RecomendacionesPanel({
           title={`${total} cambios propuestos`}
           subtitle={
             nObligatorias > 0
-              ? `${nObligatorias} obligatorios (slot bloqueado) · ${nOpcionales} opcionales (mejora de OEE). Puedes aceptar uno, varios o todos; el comparador se actualiza al instante.`
-              : `${total} mejoras opcionales. Puedes aceptar uno, varios o todos; el comparador se actualiza al instante.`
-          }
-          action={
-            <span className="inline-flex items-center gap-1.5 rounded-pill border border-hairline bg-cream px-2.5 py-1 text-[11px] text-ink-3">
-              <span className="num font-medium text-ink">{applied.size}</span>
-              <span>de</span>
-              <span className="num font-medium text-ink">{total}</span>
-              <span>seleccionados</span>
-            </span>
+              ? `${nObligatorias} obligatorios (slot bloqueado) · ${nOpcionales} opcionales (mejora de OEE). Es un plan completo del optimizador: se aceptan todos a la vez o ninguno.`
+              : `${total} mejoras opcionales. Es un plan completo del optimizador: se aceptan todas a la vez o ninguna.`
           }
         />
         <div className="grid grid-cols-1 gap-5 px-5 py-5 lg:grid-cols-[1fr_320px]">
@@ -383,7 +361,7 @@ function RecomendacionesPanel({
               </div>
             )}
             {data.recomendaciones.map((r) => (
-              <RecoCard key={r.id} reco={r} applied={applied.has(r.id)} onToggle={() => toggle(r.id)} />
+              <RecoCard key={r.id} reco={r} applied={applied} />
             ))}
           </div>
 
@@ -391,31 +369,26 @@ function RecomendacionesPanel({
             <div className="eyebrow text-ink-3">Comparador</div>
             <div className="mt-4 space-y-4">
               <KPI label="Plan original" value={pct(oeeOriginal, 1)} />
-              <KPI
-                label={`Con mejoras aplicadas (${applied.size})`}
-                value={pct(oeeActual, 1)}
-                accent="moss"
-                delta={{ value: gananciaAplicada, format: 'pts' }}
-              />
               <div className="border-t border-hairline pt-3">
                 <KPI
-                  label="Plan recomendado (todas)"
-                  value={pct(oeeMaximo, 1)}
+                  label={applied ? 'Plan optimizado (en vigor)' : 'Plan optimizado (si aceptas)'}
+                  value={pct(data.oeePlanRecomendado, 1)}
+                  accent={applied ? 'moss' : undefined}
                   delta={{ value: data.gananciaPts, format: 'pts' }}
                 />
               </div>
               <Button
-                variant="primary"
+                variant={applied ? 'secondary' : 'primary'}
                 className="w-full"
-                onClick={() => setApplied(new Set(data.recomendaciones.map((r) => r.id)))}
+                onClick={onToggle}
               >
-                Aplicar todas
+                {applied ? '↻ Restablecer plan original' : `Aplicar las ${total} mejoras`}
               </Button>
-              {applied.size > 0 && (
-                <Button variant="ghost" className="w-full" onClick={() => setApplied(new Set())}>
-                  Restablecer
-                </Button>
-              )}
+              <p className="text-[11px] text-ink-4">
+                {applied
+                  ? 'El calendario muestra el plan optimizado con todos los cambios. Pulsa para volver al plan original.'
+                  : 'Al aceptar, el calendario se actualiza con las nuevas asignaciones de los OFs movidos.'}
+              </p>
             </div>
           </div>
         </div>
@@ -424,7 +397,7 @@ function RecomendacionesPanel({
   );
 }
 
-function RecoCard({ reco, applied, onToggle }: { reco: Recomendacion; applied: boolean; onToggle: () => void }) {
+function RecoCard({ reco, applied }: { reco: Recomendacion; applied: boolean }) {
   const tipoMap = {
     reordenar: { label: 'Reordenar', cls: 'bg-gold-soft text-gold-700' },
     mover_linea: { label: 'Mover de línea', cls: 'bg-damm-soft text-damm-700' },
@@ -483,18 +456,9 @@ function RecoCard({ reco, applied, onToggle }: { reco: Recomendacion; applied: b
             </div>
           )}
         </div>
-        <div className="flex flex-col items-end gap-2">
-          <div className="text-right">
-            <div className="eyebrow text-ink-3">Ganancia</div>
-            <div className="num text-lg font-semibold text-moss">{pts(reco.gananciaPts)}</div>
-          </div>
-          <Button
-            variant={applied ? 'secondary' : 'primary'}
-            size="sm"
-            onClick={onToggle}
-          >
-            {applied ? '✓ Aplicada' : 'Aplicar'}
-          </Button>
+        <div className="text-right">
+          <div className="eyebrow text-ink-3">Ganancia</div>
+          <div className="num text-lg font-semibold text-moss">{pts(reco.gananciaPts)}</div>
         </div>
       </div>
     </div>

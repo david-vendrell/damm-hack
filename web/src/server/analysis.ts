@@ -476,6 +476,7 @@ export async function analizarPlanConLineWise(
     oeeBaseline,
     oeeOptimizado,
   );
+  const filasOptimizadas = applyOptimizerSwapsToFilas(filasAug, swapRows);
 
   return {
     ...base,
@@ -491,7 +492,79 @@ export async function analizarPlanConLineWise(
     totalHl,
     meta: { source: 'linewise', via: lw.via, spaceLatencyMs: lw.latencyMs },
     planRecomendado,
+    filasOptimizadas,
   };
+}
+
+/**
+ * Materialize the "plan optimizado" view of the OFs by applying each swap
+ * from the optimizer's swap_log to a copy of the input filas. Each swap
+ * row carries (sku, fromLinea/Dia/Turno) → (toLinea/Dia/Turno); we find
+ * the matching OF and update its slot. When multiple OFs match the source
+ * slot (same SKU same shift), the first unswapped one is picked.
+ *
+ * Approximation, but visually faithful: the resulting per-cell content of
+ * the calendar reflects exactly which OF the optimizer recommends placing
+ * where. Priority inserts (from === null) get a synthetic OF added.
+ */
+function applyOptimizerSwapsToFilas(filas: FilaPlan[], swaps: SwapRow[]): FilaPlan[] {
+  const copy = filas.map((f) => ({ ...f }));
+  const swapped = new Set<string>();   // block_ids already moved (don't double-move)
+
+  for (const swap of swaps) {
+    // Priority insert (no source slot) → append a synthetic OF
+    if (!swap.fromLinea && swap.toLinea) {
+      copy.push({
+        of: `PRIO-${swap.sku}-${swap.toDia}`,
+        linea: swap.toLinea,
+        secuencia: copy.length + 1,
+        dia: swap.toDia ?? '',
+        turno: swap.toTurno ?? undefined,
+        sku: swap.sku,
+        nombre: swap.sku,
+        hlPlan: 0,
+        skuAnterior: null,
+        tipoCambio: 'inicio',
+        oeePrevisto: 0,
+        veredicto: 'procede',
+        motivo: swap.descripcion,
+      });
+      continue;
+    }
+    // Eviction (no target slot) → drop the OF from the materialized view
+    if (swap.fromLinea && !swap.toLinea) {
+      const idx = copy.findIndex(
+        (f) =>
+          !swapped.has(f.of) &&
+          f.sku === swap.sku &&
+          f.linea === swap.fromLinea &&
+          f.dia === swap.fromDia &&
+          (!swap.fromTurno || !f.turno || f.turno === swap.fromTurno),
+      );
+      if (idx >= 0) {
+        swapped.add(copy[idx].of);
+        copy.splice(idx, 1);
+      }
+      continue;
+    }
+    // Normal move
+    const idx = copy.findIndex(
+      (f) =>
+        !swapped.has(f.of) &&
+        f.sku === swap.sku &&
+        f.linea === swap.fromLinea &&
+        f.dia === swap.fromDia &&
+        (!swap.fromTurno || !f.turno || f.turno === swap.fromTurno),
+    );
+    if (idx >= 0) {
+      swapped.add(copy[idx].of);
+      const moved = copy[idx];
+      if (swap.toLinea) moved.linea = swap.toLinea;
+      if (swap.toDia)   moved.dia   = swap.toDia;
+      if (swap.toTurno) moved.turno = swap.toTurno;
+    }
+  }
+  return copy;
 }
 
 /** Turn the optimizer's per-move swap log into the Recomendacion shape the
