@@ -186,6 +186,7 @@ def optimize_plan_v3(
                 swap_log.append({
                     "iteration":     0,
                     "move_type":     "eviction",
+                    "is_required":   True,        # forced by priority insert
                     "block_id":      evicted_jid,
                     "sku":           str(victim.sku),
                     "from_linea":    victim_slot.linea,
@@ -206,6 +207,7 @@ def optimize_plan_v3(
             swap_log.append({
                 "iteration":     0,
                 "move_type":     "priority_insert",
+                "is_required":   True,        # caller demanded it
                 "block_id":      pj.job_id,
                 "sku":           str(pj.sku),
                 "from_linea":    None,
@@ -296,6 +298,7 @@ def optimize_plan_v3(
         swap_log.append({
             "iteration":     0,
             "move_type":     "displaced_reassignment",
+            "is_required":   True,        # follow-up to a required eviction
             "block_id":      jid,
             "sku":           str(j.sku),
             "from_linea":    None,
@@ -390,14 +393,21 @@ def optimize_plan_v3(
             matrix_dict, avg_days_between_maint,
         )
 
+        # Classify as required-by-incident vs optional improvement: a move
+        # from a blocked slot (LIMPIEZA / MANTENIMIENTO / OUTAGE) is required
+        # because the OF couldn't stay there anyway. Otherwise it's an
+        # opportunistic OEE gain the planner could decline.
+        from_slot = slots_by_id[from_sid]
+        is_required = bool(getattr(from_slot, "is_blocked", False))
         move_record = {
             "iteration":       iteration + 1,
             "move_type":       "optimization",
+            "is_required":     is_required,
             "block_id":        jid,
             "sku":             str(j_obj.sku),
-            "from_linea":      slots_by_id[from_sid].linea,
-            "from_fecha":      slots_by_id[from_sid].fecha.isoformat(),
-            "from_turno":      slots_by_id[from_sid].turno,
+            "from_linea":      from_slot.linea,
+            "from_fecha":      from_slot.fecha.isoformat(),
+            "from_turno":      from_slot.turno,
             "to_linea":        slots_by_id[to_sid].linea,
             "to_fecha":        slots_by_id[to_sid].fecha.isoformat(),
             "to_turno":        slots_by_id[to_sid].turno,
@@ -417,6 +427,44 @@ def optimize_plan_v3(
     best_preds = _score_full(best_blocks, lookups_dir, models_dir)
     final_score = _hl_weighted(best_preds, best_blocks, objective)
 
+    # Required-only score: simulate the plan that would result if we had
+    # applied ONLY the moves with is_required=True (i.e., only the changes
+    # forced by the declared incidents) and reverted every optional
+    # improvement the optimizer found.
+    n_required = sum(1 for m in swap_log if m.get("is_required"))
+    n_optional = len(swap_log) - n_required
+    if n_optional == 0:
+        # Nothing optional was applied → required-only IS the final score
+        score_required_only = float(final_score)
+    else:
+        required_assignment: dict[str, str | None] = {}
+        # Start from baseline (planner's original) assignment
+        for _, row in blocks.iterrows():
+            sid = _slot_id_from_row(row, slots_by_id)
+            required_assignment[str(row["block_id"])] = sid
+        # Apply required swap_log entries in iteration order
+        for m in swap_log:
+            if not m.get("is_required"):
+                continue
+            jid = m.get("block_id")
+            to_sid = (f"L{m['to_linea']}|{m['to_fecha']}|{m['to_turno']}"
+                      if m.get("to_linea") is not None else None)
+            if jid and to_sid and to_sid in slots_by_id:
+                required_assignment[jid] = to_sid
+            elif jid and m.get("to_linea") is None:
+                # Eviction: the displaced OF was kicked out — leave it
+                # unassigned for the simulated required-only plan
+                required_assignment[jid] = None
+        required_assignment = {j: s for j, s in required_assignment.items() if s is not None}
+        try:
+            req_blocks = _materialise_blocks(blocks, required_assignment, jobs_by_id, slots_by_id)
+            req_preds  = _score_full(req_blocks, lookups_dir, models_dir)
+            score_required_only = float(_hl_weighted(req_preds, req_blocks, objective))
+        except Exception:
+            # Defensive: if simulation fails, report the optimized score
+            # rather than crashing the whole call.
+            score_required_only = float(final_score)
+
     audit = full_audit(blocks, best_blocks, final_assignment, jobs_by_id, slots_by_id)
     per_line = _per_line_breakdown(blocks, base_preds, best_blocks, best_preds, objective)
     per_day  = _per_day_factory_breakdown(blocks, base_preds, best_blocks, best_preds, objective)
@@ -434,6 +482,9 @@ def optimize_plan_v3(
         "objective":          objective,
         "baseline_score":     float(baseline_score),
         "optimized_score":    float(final_score),
+        "score_required_only": score_required_only,
+        "n_required_moves":   n_required,
+        "n_optional_moves":   n_optional,
         "delta_oee_pts":      round((final_score - baseline_score) * 100, 3),
         "n_changes":          len(swap_log),
         "best_blocks":        best_blocks,

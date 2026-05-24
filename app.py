@@ -223,9 +223,14 @@ def _swap_log_v3_table(swap_log: list[dict]) -> pd.DataFrame:
     rows = []
     for i, s in enumerate(swap_log, 1):
         mt = s.get("move_type", "optimization")
+        label = type_label.get(mt, mt)
+        # For pure optimization moves, distinguish required (forced by an
+        # incident — origin slot was blocked) from optional (free improvement).
+        if mt == "optimization":
+            label = "🔧 Obligatorio" if s.get("is_required") else "💡 Opcional"
         rows.append({
             "#":              i,
-            "Tipo":           type_label.get(mt, mt),
+            "Tipo":           label,
             "SKU":            s["sku"],
             "Desde":          _fmt_loc(s.get("from_linea"), s.get("from_fecha"), s.get("from_turno")),
             "Hacia":          _fmt_loc(s.get("to_linea"), s.get("to_fecha"), s.get("to_turno")),
@@ -374,9 +379,16 @@ def _cost_analysis_section(
     outages: list[dict],
     priority_ofs: list[dict],
     incidencias: dict,
+    full_result: dict | None = None,
 ) -> str:
     """Render the cost-of-incident block in the summary markdown. Returns
-    empty string when no incidents were declared."""
+    empty string when no incidents were declared.
+
+    When `full_result` is provided AND it carries `score_required_only`,
+    the table expands to 3 rows so the planner can see what the cost would
+    be if the optimizer applied only the moves *forced* by the incident
+    (no optional improvements) vs the fully-optimized output.
+    """
     if not cost_info or "error" in cost_info:
         return ""
     clean_pct    = cost_info["clean_score"] * 100
@@ -386,12 +398,40 @@ def _cost_analysis_section(
     sign_arrow   = "▼" if cost_pts < -0.01 else ("▲" if cost_pts > 0.01 else "=")
 
     out: list[str] = ["", "#### ⚖️ Coste de las incidencias", ""]
-    out.append("|                                | OEE de la fábrica |")
-    out.append("|--------------------------------|------------------:|")
-    out.append(f"| Sin incidencias (techo)        | **{clean_pct:.2f}%** |")
-    out.append(f"| Con incidencias (real)         | **{full_pct:.2f}%** |")
-    out.append(f"| **Diferencia**                 | **{sign_arrow} {cost_pts:+.2f} pts**  ·  **{displaced_hl:,} HL** reasignados |")
+    out.append("|                                | OEE de la fábrica | Movimientos |")
+    out.append("|--------------------------------|------------------:|------------:|")
+    out.append(f"| Plan original (sin incidencia) | **{clean_pct:.2f}%** | — |")
+
+    # 3-row mode when the optimizer reported a required-only counterfactual
+    req_pct: float | None = None
+    n_req = n_opt = 0
+    if full_result is not None:
+        sro = full_result.get("score_required_only")
+        n_req = int(full_result.get("n_required_moves", 0))
+        n_opt = int(full_result.get("n_optional_moves", 0))
+        if sro is not None and (n_req or n_opt):
+            req_pct = float(sro) * 100
+            out.append(f"| Replan mínimo (sólo lo obligatorio) | **{req_pct:.2f}%** | "
+                       f"{n_req} 🔧 obligatorio(s) |")
+
+    out.append(f"| Replan optimizado (con mejoras) | **{full_pct:.2f}%** | "
+               f"{n_req + n_opt} totales ({n_opt} 💡 opcionales) |")
+    out.append(f"| **Diferencia (plan original → optimizado)** | "
+               f"**{sign_arrow} {cost_pts:+.2f} pts**  ·  **{displaced_hl:,} HL** reasignados | |")
     out.append("")
+
+    # If we have the 3-row breakdown, add interpretation
+    if req_pct is not None:
+        coste_real = clean_pct - req_pct           # how much the incident costs even at minimum disruption
+        mejora_opcional = full_pct - req_pct       # how much the optimizer adds on top
+        out.append(f"> **Coste real de la incidencia** (inevitable, aunque sólo apliquemos lo obligatorio): "
+                   f"**{coste_real:+.2f} pts**.")
+        if n_opt:
+            out.append(f">")
+            out.append(f"> **Mejora opcional disponible**: aceptar los **{n_opt} cambios marcados 💡 OPCIONAL** "
+                       f"añade **{mejora_opcional:+.2f} pts** extra. Es decisión del planificador "
+                       f"si la mejora justifica la disrupción adicional para el equipo.")
+        out.append("")
 
     if outages:
         out.append("> ⛔ Las **outages** son inevitables. El número de arriba es el "
@@ -644,7 +684,8 @@ def optimize_v3(
     status_emoji = "✅" if audit_ok else "⚠️"
     incidencias_md = _incidencias_section(result.get("incidencias", {}))
     cost_md = _cost_analysis_section(
-        cost_info, outages, priority_ofs, result.get("incidencias", {})
+        cost_info, outages, priority_ofs, result.get("incidencias", {}),
+        full_result=result,
     )
     # Mid-week replan header — shown only if the planner passed a replan_from_ts
     replan_md = ""
