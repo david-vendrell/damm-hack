@@ -12,10 +12,8 @@ import {
   ClipboardCheck,
   Command,
   Factory,
-  FileText,
   Search,
   Siren,
-  Sparkles,
   Star,
 } from './icons';
 
@@ -152,37 +150,8 @@ export function Sidebar() {
               </li>
             );
           })}
-          <li>
-            <Link
-              href="#"
-              className="group flex items-center gap-2.5 rounded-soft pl-3 pr-2 py-2 text-xs text-ink-3 transition-colors hover:bg-surface/60 hover:text-ink-2"
-            >
-              <FileText className="h-4 w-4 shrink-0" strokeWidth={1.75} />
-              <span>Documentos</span>
-            </Link>
-          </li>
         </ul>
       </nav>
-
-      {/* Brief mini card — replaces Dribbble's AI Upgrade card */}
-      <div className="m-3 mt-2 overflow-hidden rounded-card border border-hairline bg-surface">
-        <div className="hatch-gold absolute pointer-events-none" />
-        <div className="relative px-3.5 py-3">
-          <div className="flex items-center gap-1.5">
-            <Sparkles className="h-3 w-3 text-gold" strokeWidth={2} />
-            <span className="eyebrow text-gold-700">Brief de turno</span>
-          </div>
-          <p className="mt-1.5 serif text-[13px] leading-snug text-ink">
-            3 incidencias detectadas en las últimas 8h
-          </p>
-          <Link
-            href="/urgencias"
-            className="mt-2.5 inline-flex items-center gap-1 rounded-pill bg-ink px-2.5 py-1 text-[10px] uppercase tracking-wider text-surface transition-colors hover:bg-ink-2"
-          >
-            Ver brief →
-          </Link>
-        </div>
-      </div>
 
       {/* User chip */}
       <div className="border-t border-hairline px-3 py-3">

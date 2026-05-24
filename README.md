@@ -66,6 +66,37 @@ Useful flags:
   ```
 - macOS only, and only if you intend to retrain the model: `brew install libomp` (LightGBM dependency). Not needed to run the dashboard.
 
+### Environment variables (`web/.env`)
+
+The dashboard reads configuration from `web/.env` (loaded by Next.js) or `web/.env.local` for personal overrides. Both files are gitignored. Create `web/.env` once on a fresh clone:
+
+```bash
+# web/.env
+DATABASE_URL="file:./prisma/dev.db"     # Prisma SQLite path (used by start.sh)
+OPENAI_API_KEY="sk-..."                 # required: powers the Ask bar in Observabilidad
+OPENAI_MODEL="gpt-4o-mini"              # optional, defaults to gpt-4o-mini
+HF_TOKEN="hf_..."                       # optional: enables the LineWise HF Space as a model fallback
+LINEWISE_URL="http://localhost:8001"    # optional: local model sidecar URL (default shown)
+DATA_DIR="../Repte operacions"          # optional: override path to the source Excels
+```
+
+What each one does:
+
+- **`DATABASE_URL`** — Prisma's SQLite connection string. The default `file:./prisma/dev.db` matches what `start.sh` migrates. Only change it if you point Prisma at a different file.
+- **`OPENAI_API_KEY`** — required for the natural-language Ask bar in `/observabilidad` (`web/src/server/openai.ts`). Without it, the Ask bar returns a `MissingEnvError`; the rest of the dashboard still works. Get a key at <https://platform.openai.com/api-keys>.
+- **`OPENAI_MODEL`** — model used by the Ask bar. Defaults to `gpt-4o-mini` (cheap + fast). Override with `gpt-4o` or another OpenAI chat model if you want higher quality.
+- **`HF_TOKEN`** — Hugging Face token with read access to the private `marcaguilar/linewise-demo` Space. When set, `web/src/server/linewise-client.ts` calls the Space for predictions; when absent, the app degrades to a local heuristic and surfaces the warning *"Modelo LineWise no disponible (sin HF_TOKEN o Space offline). Predicciones por heurística local."* Also used by `scripts/10_push_to_hf_space.py` when deploying the Space.
+- **`LINEWISE_URL`** — if you run the engine as a local sidecar (`python3 app.py`), point this at it. Defaults to `http://localhost:8001`.
+- **`DATA_DIR`** — used by `npm run ingest` if you keep the Damm Excels somewhere other than `Repte operacions/`.
+
+Repo-level scripts (Python) only need `HF_TOKEN`, and only to push the HF Space. Export it inline:
+
+```bash
+HF_TOKEN=hf_xxx python3 scripts/10_push_to_hf_space.py
+```
+
+Never commit `.env` or `.env.local`. They are gitignored on purpose; keys are personal.
+
 ---
 
 ## What lives where
