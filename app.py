@@ -252,6 +252,177 @@ def _parse_json_param(raw: str | None, name: str) -> tuple[list[dict], str | Non
     return parsed, None
 
 
+def _verdict(cost_pts: float, displaced_hl: int, placed: bool = True) -> tuple[str, str]:
+    """Map (cost in pts, HL desplazados, placed) → (badge, recommendation).
+
+    `cost_pts` convention: > 0 = accepting the OF *helped* OEE,
+                            < 0 = it hurt OEE (the "true" cost case).
+
+    Logic:
+      · If the OF couldn't be placed at all → IMPOSIBLE
+      · If OEE went UP or held flat, only severe churn (>5 000 HL) flags it
+      · If OEE went DOWN, threshold by penalty magnitude AND displaced HL
+        - > 2.0 pts down OR > 2 000 HL displaced → EVITAR
+        - > 0.5 pts down OR >   500 HL displaced → REVISAR
+        - otherwise → PROCEDE
+    """
+    if not placed:
+        return "🚫 IMPOSIBLE", "El optimizador no encontró slot factible antes del plazo."
+
+    # OEE neutral or positive (the priority OF helped the plan): the only
+    # concern is operational churn. Be lenient.
+    if cost_pts >= 0:
+        if displaced_hl > 5000:
+            return "🟠 REVISAR", (
+                "OEE no empeora, pero la inserción reorganiza mucha producción "
+                "(>5 000 HL). Confirma que el equipo pueda gestionar la churn."
+            )
+        return "🟢 PROCEDE", (
+            "Impacto bajo: acepta el pedido sin penalización de OEE."
+        )
+
+    # Real cost: incident hurt OEE. Apply the strict thresholds.
+    pen = -cost_pts
+    if pen > 2.0 or displaced_hl > 2000:
+        return "🔴 EVITAR", (
+            f"Coste alto ({pen:.2f} pts de OEE) — valora rechazar el pedido "
+            f"o renegociar plazo con el cliente."
+        )
+    if pen > 0.5 or displaced_hl > 500:
+        return "🟠 REVISAR", (
+            f"Coste moderado ({pen:.2f} pts) — decisión del planificador "
+            f"frente al valor comercial del pedido."
+        )
+    return "🟢 PROCEDE", (
+        "Impacto bajo — se puede aceptar sin penalización notable."
+    )
+
+
+def _compute_incident_cost(
+    path: str,
+    objective: str,
+    outages: list[dict],
+    priority_ofs: list[dict],
+    full_result: dict,
+) -> dict | None:
+    """Run the optimizer a second time WITHOUT incidents and diff against
+    the full result so we can show the planner the true cost.
+
+    Returns None when no incidents are declared (nothing to compare).
+    """
+    if not (outages or priority_ofs):
+        return None
+    try:
+        clean_result, _ = _optimize_pipeline_v3(path, objective, [], [])
+    except Exception as exc:
+        return {"error": f"clean pass failed: {exc}"}
+    if not clean_result or clean_result.get("best_blocks", pd.DataFrame()).empty:
+        return None
+
+    clean_score = float(clean_result["optimized_score"])
+    full_score  = float(full_result["optimized_score"])
+    # cost_pts > 0 = better with incidents · < 0 = worse · = 0 = no impact
+    cost_pts = (full_score - clean_score) * 100.0
+
+    # Displaced HL: sum HL of baseline OFs whose final (línea, fecha, turno)
+    # differs between the clean and full plans. Excludes priority OFs (they
+    # don't exist in the clean plan so the join is trivially missing).
+    clean_blocks = clean_result["best_blocks"]
+    full_blocks  = full_result["best_blocks"]
+
+    def _slot_key(row):
+        try:
+            return (int(row["linea"]),
+                    pd.Timestamp(row["fecha"]).date().isoformat(),
+                    str(row.get("turno") or "M"))
+        except Exception:
+            return None
+
+    clean_idx = {str(r["block_id"]): _slot_key(r) for _, r in clean_blocks.iterrows()}
+    full_idx  = {str(r["block_id"]): _slot_key(r) for _, r in full_blocks.iterrows()}
+
+    displaced_hl = 0
+    common = set(clean_idx) & set(full_idx)
+    for bid in common:
+        if clean_idx[bid] != full_idx[bid]:
+            row = full_blocks[full_blocks["block_id"] == bid]
+            if len(row):
+                hl = row.iloc[0].get("hl")
+                if pd.notna(hl):
+                    displaced_hl += int(hl)
+
+    return {
+        "clean_score":    clean_score,
+        "full_score":     full_score,
+        "cost_pts":       cost_pts,
+        "displaced_hl":   int(displaced_hl),
+        "clean_elapsed":  float(clean_result.get("elapsed_sec", 0.0)),
+    }
+
+
+def _cost_analysis_section(
+    cost_info: dict | None,
+    outages: list[dict],
+    priority_ofs: list[dict],
+    incidencias: dict,
+) -> str:
+    """Render the cost-of-incident block in the summary markdown. Returns
+    empty string when no incidents were declared."""
+    if not cost_info or "error" in cost_info:
+        return ""
+    clean_pct    = cost_info["clean_score"] * 100
+    full_pct     = cost_info["full_score"]  * 100
+    cost_pts     = cost_info["cost_pts"]
+    displaced_hl = cost_info["displaced_hl"]
+    sign_arrow   = "▼" if cost_pts < -0.01 else ("▲" if cost_pts > 0.01 else "=")
+
+    out: list[str] = ["", "#### ⚖️ Coste de las incidencias", ""]
+    out.append("|                                | OEE de la fábrica |")
+    out.append("|--------------------------------|------------------:|")
+    out.append(f"| Sin incidencias (techo)        | **{clean_pct:.2f}%** |")
+    out.append(f"| Con incidencias (real)         | **{full_pct:.2f}%** |")
+    out.append(f"| **Diferencia**                 | **{sign_arrow} {cost_pts:+.2f} pts**  ·  **{displaced_hl:,} HL** reasignados |")
+    out.append("")
+
+    if outages:
+        out.append("> ⛔ Las **outages** son inevitables. El número de arriba es el "
+                   "coste que esta semana va a asumir por la avería declarada.")
+        out.append("")
+
+    if priority_ofs:
+        # Per-priority verdict (cost prorated when >1 priority OF — simplification)
+        placed_set = {str(j.get("sku")) for j in (incidencias.get("priority_ofs_failed") or [])}
+        n_prio = len(priority_ofs)
+        cost_per_prio = cost_pts / n_prio if n_prio else 0.0
+        hl_per_prio   = displaced_hl / n_prio if n_prio else 0
+        out.append("##### 📋 Veredicto por OF prioritario")
+        out.append("")
+        out.append("| # | SKU | HL | Plazo | Coste (atribuido) | HL desplazados | Veredicto | Recomendación |")
+        out.append("|---|-----|---:|-------|------------------:|---------------:|-----------|---------------|")
+        for i, p in enumerate(priority_ofs, 1):
+            sku = str(p.get("sku", "?"))
+            placed = sku not in placed_set
+            badge, advice = _verdict(cost_per_prio, int(hl_per_prio), placed=placed)
+            hl_val = p.get("hl", "?")
+            try:
+                hl_val_disp = f"{int(hl_val):,}"
+            except (TypeError, ValueError):
+                hl_val_disp = str(hl_val)
+            out.append(
+                f"| {i} | `{sku}` | {hl_val_disp} | {p.get('deadline','?')} | "
+                f"{cost_per_prio:+.2f} pts | {int(hl_per_prio):,} HL | "
+                f"{badge} | {advice} |"
+            )
+        out.append("")
+        if n_prio > 1:
+            out.append(f"> *Coste y desplazamientos distribuidos por igual entre los "
+                       f"{n_prio} OFs prioritarios (simplificación; "
+                       f"para atribución exacta habría que ejecutar el optimizador 1 vez por OF).*")
+            out.append("")
+
+    return "\n".join(out) + "\n"
+
+
 def _incidencias_section(incidencias: dict) -> str:
     """Render the Incidencias summary as Markdown. Empty string if no incidents."""
     if not incidencias:
@@ -401,6 +572,18 @@ def optimize_v3(
     except Exception as exc:
         return (f"❌ Error optimizando: {exc}", empty, empty, empty)
 
+    # Cost-of-incidents analysis: when the planner declared any outage or
+    # priority OF, re-run the optimizer with NO incidents and diff. This
+    # tells them what the disruption actually cost (in OEE pts + HL).
+    cost_info = None
+    if (outages or priority_ofs) and result.get("best_blocks") is not None \
+            and not result["best_blocks"].empty:
+        try:
+            progress(0.85, desc="Calculando coste de las incidencias…")
+            cost_info = _compute_incident_cost(path, objective, outages, priority_ofs, result)
+        except Exception as exc:
+            cost_info = {"error": str(exc)}
+
     if not result or not result.get("best_blocks", pd.DataFrame()).shape[0]:
         return ("⚠️ No se han encontrado bloques válidos para optimizar.",
                 empty, empty, empty)
@@ -437,6 +620,9 @@ def optimize_v3(
     progress(0.95, desc="Generando resumen…")
     status_emoji = "✅" if audit_ok else "⚠️"
     incidencias_md = _incidencias_section(result.get("incidencias", {}))
+    cost_md = _cost_analysis_section(
+        cost_info, outages, priority_ofs, result.get("incidencias", {})
+    )
 
     # Build per-línea diagnostic markdown (with Simpson's-paradox note)
     per_line_md_rows = []
@@ -465,7 +651,7 @@ def optimize_v3(
 - **{total_hl:,} HL** totales planificados (incluye OF(s) prioritario(s) si los hay)
 - Modo: **{obj_label}**
 {mant_line}
-{incidencias_md}
+{incidencias_md}{cost_md}
 #### Detalle operacional
 {weekly}
 
