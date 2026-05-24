@@ -36,6 +36,9 @@ export function UrgenciasView() {
   const [hydrated, setHydrated] = useState(false);
   const [kind, setKind] = useState<IncidentKind | null>(null);
   const [preview, setPreview] = useState<AnalisisPlan | null>(null);
+  // Remember the last submitted payload so ImpactView can tell whether the
+  // optimizer actually placed a priority OF (vs silently skipping it).
+  const [lastPayload, setLastPayload] = useState<{ outage?: OutageInput; priorityOf?: PriorityInput } | null>(null);
   const [applied, setApplied] = useState(false);
 
   // Load the active plan (same source as /validar's rehydration)
@@ -70,6 +73,7 @@ export function UrgenciasView() {
       }
       return (await r.json()) as AnalisisPlan;
     },
+    onMutate: (payload) => { setLastPayload(payload); },
     onSuccess: (data) => { setPreview(data); setApplied(false); },
   });
 
@@ -90,6 +94,7 @@ export function UrgenciasView() {
   const resetIncident = () => {
     setKind(null);
     setPreview(null);
+    setLastPayload(null);
     setApplied(false);
     submit.reset();
     apply.reset();
@@ -133,6 +138,7 @@ export function UrgenciasView() {
             <ImpactView
               before={active}
               after={preview}
+              submitted={lastPayload}
               onApply={() => apply.mutate()}
               onCancel={resetIncident}
               applying={apply.isPending}
@@ -322,7 +328,10 @@ function PriorityForm({
   const [preferred, setPreferred] = useState<string>('');
   const [reason, setReason] = useState('');
 
-  const valid = sku.trim().length >= 3 && hlVal > 0 && !!deadline;
+  const valid = sku.trim().length >= 3 && Number.isFinite(hlVal) && hlVal > 0 && !!deadline;
+  // Typical Damm shift ≈ 1k-10k HL. Anything above ~50k is almost certainly
+  // a typo or a misunderstanding of units (HL vs CAJ). Warn but don't block.
+  const hlWarning = Number.isFinite(hlVal) && (hlVal > 50_000 || hlVal < 50);
 
   const handleSubmit = () => {
     if (!valid) return;
@@ -362,6 +371,11 @@ function PriorityForm({
             onChange={(e) => setHlVal(Number(e.target.value))}
             className="num rounded-soft border border-hairline bg-surface px-3 py-2 text-sm text-ink"
           />
+          {hlWarning && (
+            <span className="text-[11px] text-damm">
+              Valor inusual. Un turno típico produce entre 1.000 y 10.000 HL.
+            </span>
+          )}
         </div>
         <div className="flex flex-col gap-1.5">
           <label className="eyebrow text-ink-3">Plazo (deadline)</label>
@@ -417,6 +431,27 @@ function SubmittingState() {
   );
 }
 
+function WarningBanner({
+  title, message, tone = 'warn',
+}: {
+  title: string;
+  message: string;
+  tone?: 'warn' | 'info';
+}) {
+  const cls = tone === 'warn'
+    ? 'border-damm/30 bg-damm-soft/40 text-damm-700'
+    : 'border-gold/30 bg-gold-soft text-gold-700';
+  return (
+    <div className={cn('flex items-start gap-3 rounded-soft border px-4 py-3 text-xs', cls)}>
+      <AlertTriangle className="h-3.5 w-3.5 shrink-0" strokeWidth={2} />
+      <div className="flex-1">
+        <div className="font-medium">{title}</div>
+        <p className="mt-1 opacity-80">{message}</p>
+      </div>
+    </div>
+  );
+}
+
 function ErrorBanner({ message, onDismiss }: { message: string; onDismiss: () => void }) {
   return (
     <div className="flex items-start gap-3 rounded-soft border border-damm/30 bg-damm-soft/40 px-4 py-3 text-xs text-damm-700">
@@ -435,10 +470,11 @@ function ErrorBanner({ message, onDismiss }: { message: string; onDismiss: () =>
 /* ─────────────────────────── Impact view ─────────────────────────── */
 
 function ImpactView({
-  before, after, onApply, onCancel, applying, applied, applyError,
+  before, after, submitted, onApply, onCancel, applying, applied, applyError,
 }: {
   before: AnalisisPlan;
   after:  AnalisisPlan;
+  submitted: { outage?: OutageInput; priorityOf?: PriorityInput } | null;
   onApply: () => void;
   onCancel: () => void;
   applying: boolean;
@@ -456,9 +492,41 @@ function ImpactView({
   const arrow = deltaPts < -0.05 ? '▼' : deltaPts > 0.05 ? '▲' : '=';
   const tone  = deltaPts < -0.05 ? 'text-damm' : deltaPts > 0.05 ? 'text-moss' : 'text-ink-3';
   const recos = after.planRecomendado?.recomendaciones ?? [];
+  // Detect: planner submitted a priority OF, but the optimizer's recos don't
+  // include a 'prioritario' entry → the OF was silently dropped (typically
+  // because the HL is unfittable, the deadline is too tight, the SKU has no
+  // feasible línea, or the value submitted was invalid).
+  const priorityNotPlaced =
+    !!submitted?.priorityOf &&
+    !recos.some((r) => r.categoria === 'prioritario');
+  // Detect: planner submitted an outage, but the optimizer applied zero
+  // moves → either the outage hits an empty slot (no impact) or the model
+  // didn't recognize it. Either way the planner needs to know.
+  const outageNoEffect = !!submitted?.outage && recos.length === 0;
 
   return (
     <div className="space-y-5">
+      {priorityNotPlaced && (
+        <WarningBanner
+          title="El pedido urgente no se ha podido colocar"
+          message={
+            `El modelo no encontró un slot factible para ${submitted.priorityOf!.hl.toLocaleString('es-ES')} HL ` +
+            `de ${submitted.priorityOf!.sku} antes del ${submitted.priorityOf!.deadline}. ` +
+            'Causas habituales: cantidad demasiado grande, plazo demasiado ajustado, ' +
+            'o SKU sin línea compatible. Prueba con menos HL o un plazo más tardío.'
+          }
+        />
+      )}
+      {outageNoEffect && (
+        <WarningBanner
+          title="La avería no impacta la producción"
+          message={
+            `No hay OFs planificados en L${submitted.outage!.linea} el ${submitted.outage!.fecha} turno ${submitted.outage!.turno}. ` +
+            'El slot ya estaba vacío, por lo que no hay nada que reasignar.'
+          }
+          tone="info"
+        />
+      )}
       <Card>
         <CardHeader
           eyebrow="Impacto en OEE"
