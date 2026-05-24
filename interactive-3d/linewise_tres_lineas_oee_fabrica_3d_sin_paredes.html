@@ -1070,8 +1070,8 @@ html,body{margin:0;padding:0;background:#05080f;height:100%;overflow:hidden}
     });
 
     // workers + forklift
-    workers.forEach(w=>{const sw=Math.sin(tm*6+w.userData.ph);if(w.userData.la){w.userData.la.rotation.x=sw*0.5;w.userData.ra.rotation.x=-sw*0.5;}if(!w.userData.static){w.position.x+=w.userData.dir*w.userData.spd;if(w.userData.legs)w.userData.legs.position.y=0.35+Math.abs(sw)*0.04;if(w.position.x>29){w.position.x=-29;}if(w.position.x<-29){w.position.x=29;}}});
-    fk.userData.d+=0.05;const fd=fk.userData.d%80;let fx,fz,fr;if(fd<20){fx=-27+fd*1.35;fz=19;fr=1.5708;}else if(fd<40){fx=0;fz=19-(fd-20)*1.0;fr=3.14;}else if(fd<60){fx=(fd-40)*1.35;fz=-1;fr=-1.5708;}else{fx=27;fz=-1+(fd-60)*1.0;fr=0;}fk.position.set(Math.max(-28,Math.min(28,fx)),0,Math.max(-20,Math.min(20,fz)));fk.rotation.y=fr;
+    workers.forEach(w=>{const sw=Math.sin(tm*6+w.userData.ph);if(w.userData.la){w.userData.la.rotation.x=sw*0.5;w.userData.ra.rotation.x=-sw*0.5;}if(!w.userData.static){w.position.x+=w.userData.dir*w.userData.spd*slowmoFactor;if(w.userData.legs)w.userData.legs.position.y=0.35+Math.abs(sw)*0.04;if(w.position.x>29){w.position.x=-29;}if(w.position.x<-29){w.position.x=29;}}});
+    fk.userData.d+=0.05*slowmoFactor;const fd=fk.userData.d%80;let fx,fz,fr;if(fd<20){fx=-27+fd*1.35;fz=19;fr=1.5708;}else if(fd<40){fx=0;fz=19-(fd-20)*1.0;fr=3.14;}else if(fd<60){fx=(fd-40)*1.35;fz=-1;fr=-1.5708;}else{fx=27;fz=-1+(fd-60)*1.0;fr=0;}fk.position.set(Math.max(-28,Math.min(28,fx)),0,Math.max(-20,Math.min(20,fz)));fk.rotation.y=fr;
 
     // camera fly tween
     if(cameraFly){
